@@ -53,8 +53,8 @@ function spineColor(item) {
   return SPINE_COLORS[hashCode(item.title + item.id) % SPINE_COLORS.length];
 }
 function spineWidth(item) {
-  if (item.type === "cd") return 24;
-  if (item.type === "dvd") return 30;
+  if (item.type === "cd") return 20;
+  if (item.type === "dvd") return 26;
   if (item.prog_total > 0) return Math.max(26, Math.min(62, 22 + item.prog_total / 11));
   return 30 + (hashCode(item.title) % 18);
 }

@@ -208,7 +208,7 @@ label input, label select { margin-top: 4px; }
 }
 .spine:hover { transform: translateY(-4px); }
 .spine.pulled {
-  transform: translateY(16px) scale(1.07);
+  transform: translateY(-16px) scale(1.07);
   box-shadow: inset 3px 0 5px rgba(255,255,255,0.25), inset -3px 0 5px rgba(0,0,0,0.28), 6px 18px 28px rgba(45,26,8,0.45);
   z-index: 5;
 }
