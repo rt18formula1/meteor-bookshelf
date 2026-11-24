@@ -296,6 +296,69 @@ async function handleLookup(request) {
   return json({ results, code });
 }
 
+/* ---------- CSV export ---------- */
+function buildItemFilter(request) {
+  const u = new URL(request.url);
+  const q = (u.searchParams.get("q") || "").trim();
+  const type = u.searchParams.get("type") || "";
+  const unread = u.searchParams.get("unread") === "1";
+  const withMemo = u.searchParams.get("withMemo") === "1";
+  let where = "WHERE user_id = ?";
+  const binds = [];
+  if (q) { where += " AND (title LIKE ? OR creator LIKE ?)"; binds.push(`%${q}%`, `%${q}%`); }
+  if (type && ["book", "cd", "dvd", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
+  if (unread) where += " AND status = 'unread'";
+  if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
+  return { where, binds };
+}
+function csvCell(v) {
+  const s = String(v ?? "");
+  if (/["\n\r,]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function fmtJST(ts) {
+  const d = new Date((ts || 0) * 1000 + 9 * 60 * 60 * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+async function exportCsv(request, env, user) {
+  const { where, binds } = buildItemFilter(request);
+  const rows = await env.DB.prepare(
+    `SELECT ${ITEM_COLS}, (SELECT COUNT(*) FROM memos m WHERE m.item_id = items.id) AS memo_count
+     FROM items ${where} ORDER BY created_at DESC, id DESC LIMIT 5000`
+  ).bind(user.id, ...binds).all();
+  const items = rows.results || [];
+  const memoRows = items.length
+    ? await env.DB.prepare(
+        `SELECT item_id, body FROM memos WHERE user_id = ? ORDER BY item_id, created_at ASC`
+      ).bind(user.id).all()
+    : { results: [] };
+  const memoMap = new Map();
+  for (const m of memoRows.results || []) {
+    if (!memoMap.has(m.item_id)) memoMap.set(m.item_id, []);
+    memoMap.get(m.item_id).push(m.body);
+  }
+  const header = ["ID", "種別", "タイトル", "著者/アーティスト", "出版社/レーベル", "ISBN/バーコード", "状態", "進捗（現在）", "進捗（全体）", "進捗率", "メモ件数", "メモ", "表紙URL", "登録日時", "更新日時"];
+  const lines = [header.map(csvCell).join(",")];
+  for (const it of items) {
+    const pct = it.prog_total > 0 ? Math.min(100, Math.round((it.prog_cur / it.prog_total) * 100)) + "%" : "";
+    lines.push([
+      it.id, it.type, it.title, it.creator || "", it.publisher || "", it.isbn || "", it.status,
+      it.prog_cur || 0, it.prog_total || 0, pct, it.memo_count || 0,
+      (memoMap.get(it.id) || []).join("\n"), it.cover_url || "", fmtJST(it.created_at), fmtJST(it.updated_at),
+    ].map(csvCell).join(","));
+  }
+  const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const stamp = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}${String(now.getUTCDate()).padStart(2, "0")}-${String(now.getUTCHours()).padStart(2, "0")}${String(now.getUTCMinutes()).padStart(2, "0")}`;
+  return new Response("\uFEFF" + lines.join("\r\n") + "\r\n", {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="bookshelf-${stamp}.csv"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 /* ---------- router ---------- */
 export default {
   async fetch(request, env) {
@@ -311,6 +374,7 @@ export default {
         if (!user) return err("ログインが必要です", 401);
         if (path === "/api/auth/me" && request.method === "GET") return json(user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
+        if (path === "/api/export.csv" && request.method === "GET") return exportCsv(request, env, user);
         if (path === "/api/items" && request.method === "POST") return createItem(request, env, user);
         if (path === "/api/memos" && request.method === "GET") return listAllMemos(env, user);
         if (path === "/api/lookup" && request.method === "GET") return handleLookup(request);

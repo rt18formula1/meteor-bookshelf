@@ -335,6 +335,42 @@ async function loadMemos() {
   } catch (e) { toast(e.message); }
 }
 
+/* ===== CSV export ===== */
+async function downloadCsv(params = {}) {
+  const qs = new URLSearchParams(params);
+  try {
+    const res = await fetch(`/api/export.csv?${qs}`, { credentials: "same-origin" });
+    if (res.status === 401) { showAuth(); return; }
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `エラー (${res.status})`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="([^"]+)"/);
+    a.href = url;
+    a.download = m ? m[1] : "bookshelf.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast("CSVをダウンロードしました");
+  } catch (e) { toast(e.message); }
+}
+function currentSearchParams() {
+  const params = {
+    q: $("#search-input").value.trim(),
+    type: $("#search-chips .chip.active")?.dataset.type || "",
+  };
+  if ($("#filter-unread").checked) params.unread = "1";
+  if ($("#filter-memo").checked) params.withMemo = "1";
+  return params;
+}
+$("#export-csv-btn").addEventListener("click", () => downloadCsv({}));
+$("#export-search-btn").addEventListener("click", () => downloadCsv(currentSearchParams()));
+
 /* ===== Stats ===== */
 async function loadStats() {
   try {
