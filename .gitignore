@@ -1,7 +1,4 @@
 node_modules/
+web/dist/
 .wrangler/
-.dev.vars
-.dev.vars.*
-*.log
-assets-src/
-.DS_Store
+shots/

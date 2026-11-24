@@ -1,10 +1,12 @@
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL UNIQUE,
-  pass_hash TEXT NOT NULL,
-  salt TEXT NOT NULL,
+  pass_hash TEXT NOT NULL DEFAULT '',
+  salt TEXT NOT NULL DEFAULT '',
+  firebase_uid TEXT,
   created_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,

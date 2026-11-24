@@ -1,7 +1,6 @@
 // Bookshelf App — Cloudflare Worker (API + static assets)
 // Bindings: DB (D1), IMAGES (KV), ASSETS (static)
-
-const SESSION_TTL = 60 * 60 * 24 * 30; // 30 days
+// Auth: Firebase Authentication (ID token verified against Google JWKS)
 
 /* ---------- helpers ---------- */
 function json(data, status = 200, headers = {}) {
@@ -13,79 +12,107 @@ function json(data, status = 200, headers = {}) {
 function err(message, status = 400) {
   return json({ error: message }, status);
 }
-function hex(buf) {
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+/* ---------- auth (Firebase ID token verification) ---------- */
+function b64urlToBytes(s) {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=");
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
 }
-function unhex(s) {
-  const b = new Uint8Array(s.length / 2);
-  for (let i = 0; i < b.length; i++) b[i] = parseInt(s.substr(i * 2, 2), 16);
-  return b;
-}
-function getCookie(request, name) {
-  const c = request.headers.get("Cookie") || "";
-  const m = c.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
-  return m ? decodeURIComponent(m[1]) : null;
-}
-function sessionCookie(request, token) {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL}${secure}`;
+function b64urlJson(s) {
+  return JSON.parse(new TextDecoder().decode(b64urlToBytes(s)));
 }
 
-/* ---------- auth ---------- */
-async function hashPassword(password, saltBytes) {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt: saltBytes, iterations: 100000, hash: "SHA-256" },
-    key, 256
-  );
-  return hex(bits);
-}
-async function createSession(env, userId) {
-  const token = hex(crypto.getRandomValues(new Uint8Array(32)));
-  const exp = Math.floor(Date.now() / 1000) + SESSION_TTL;
-  await env.DB.prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").bind(token, userId, exp).run();
-  return token;
-}
-async function currentUser(request, env) {
-  const token = getCookie(request, "session");
-  if (!token) return null;
-  const row = await env.DB.prepare(
-    "SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?"
-  ).bind(token, Math.floor(Date.now() / 1000)).first();
-  return row || null;
-}
+const JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
+let jwksCache = { keys: null, expiresAt: 0 };
 
-async function handleRegister(request, env) {
-  const { email, password } = await request.json().catch(() => ({}));
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err("メールアドレスの形式が正しくありません");
-  if (!password || password.length < 8) return err("パスワードは8文字以上にしてください");
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const hash = await hashPassword(password, salt);
+/* JWKS を取得する。Cache API にキャッシュし、Cache-Control の max-age を尊重する */
+async function fetchJwks() {
+  const now = Date.now();
+  if (jwksCache.keys && jwksCache.expiresAt > now) return jwksCache.keys;
+  let res = null;
   try {
-    const res = await env.DB.prepare(
-      "INSERT INTO users (email, pass_hash, salt, created_at) VALUES (?, ?, ?, ?)"
-    ).bind(email.toLowerCase(), hash, hex(salt), Math.floor(Date.now() / 1000)).run();
-    const token = await createSession(env, res.meta.last_row_id);
-    return json({ id: res.meta.last_row_id, email: email.toLowerCase() }, 201, { "Set-Cookie": sessionCookie(request, token) });
-  } catch (e) {
-    if (String(e).includes("UNIQUE")) return err("このメールアドレスは既に登録されています", 409);
-    throw e;
+    res = await caches.default.match(JWKS_URL);
+  } catch (_) { /* Cache API が使えない環境では fetch にフォールバック */ }
+  if (!res) {
+    res = await fetch(JWKS_URL);
+    if (!res.ok) throw new Error("JWKS fetch failed: " + res.status);
+    try {
+      await caches.default.put(JWKS_URL, res.clone());
+    } catch (_) { /* キャッシュ失敗は無視 */ }
   }
+  const data = await res.json();
+  const cc = res.headers.get("Cache-Control") || "";
+  const m = cc.match(/max-age=(\d+)/);
+  const ttlSec = m ? parseInt(m[1]) : 3600;
+  jwksCache = { keys: data.keys || [], expiresAt: now + ttlSec * 1000 };
+  return jwksCache.keys;
 }
-async function handleLogin(request, env) {
-  const { email, password } = await request.json().catch(() => ({}));
-  if (!email || !password) return err("メールアドレスとパスワードを入力してください");
-  const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email.toLowerCase()).first();
-  if (!user) return err("メールアドレスまたはパスワードが違います", 401);
-  const hash = await hashPassword(password, unhex(user.salt));
-  if (hash !== user.pass_hash) return err("メールアドレスまたはパスワードが違います", 401);
-  const token = await createSession(env, user.id);
-  return json({ id: user.id, email: user.email }, 200, { "Set-Cookie": sessionCookie(request, token) });
+
+/* Firebase ID トークンを検証し、ペイロードを返す。失敗時は null */
+async function verifyFirebaseToken(token, env) {
+  const projectId = env.FIREBASE_PROJECT_ID || "meteor-bookshelf";
+  const parts = String(token || "").split(".");
+  if (parts.length !== 3) return null;
+  let header, payload;
+  try {
+    header = b64urlJson(parts[0]);
+    payload = b64urlJson(parts[1]);
+  } catch (_) {
+    return null;
+  }
+  if (header.alg !== "RS256" || !header.kid) return null;
+  const keys = await fetchJwks().catch(() => null);
+  if (!keys) return null;
+  const jwk = keys.find((k) => k.kid === header.kid);
+  if (!jwk) return null;
+  let key;
+  try {
+    key = await crypto.subtle.importKey(
+      "jwk", jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false, ["verify"]
+    );
+  } catch (_) {
+    return null;
+  }
+  const signed = new TextEncoder().encode(parts[0] + "." + parts[1]);
+  const ok = await crypto.subtle
+    .verify("RSASSA-PKCS1-v1_5", key, b64urlToBytes(parts[2]), signed)
+    .catch(() => false);
+  if (!ok) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.aud !== projectId) return null;
+  if (payload.iss !== `https://securetoken.google.com/${projectId}`) return null;
+  if (!payload.exp || payload.exp <= now) return null;
+  if (!payload.sub) return null;
+  if (!payload.email) return null;
+  return payload;
 }
-async function handleLogout(request, env) {
-  const token = getCookie(request, "session");
-  if (token) await env.DB.prepare("DELETE FROM sessions WHERE token = ?").bind(token).run();
-  return json({ ok: true }, 200, { "Set-Cookie": "session=; Path=/; HttpOnly; Max-Age=0" });
+
+/* Authorization: Bearer <Firebase ID token> からユーザーを解決する。
+   firebase_uid で検索 → なければ email で検索して紐付け → なければ新規作成 */
+async function currentUser(request, env) {
+  const authz = request.headers.get("Authorization") || "";
+  const m = authz.match(/^Bearer\s+(.+)$/i);
+  if (!m) return null;
+  const payload = await verifyFirebaseToken(m[1].trim(), env);
+  if (!payload) return null;
+  const uid = payload.sub;
+  const email = String(payload.email).toLowerCase();
+  let user = await env.DB.prepare("SELECT id, email FROM users WHERE firebase_uid = ?").bind(uid).first();
+  if (user) return user;
+  user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?").bind(email).first();
+  if (user) {
+    await env.DB.prepare("UPDATE users SET firebase_uid = ? WHERE id = ?").bind(uid, user.id).run();
+    return user;
+  }
+  const res = await env.DB.prepare(
+    "INSERT INTO users (email, pass_hash, salt, firebase_uid, created_at) VALUES (?, '', '', ?, ?)"
+  ).bind(email, uid, Math.floor(Date.now() / 1000)).run();
+  return { id: res.meta.last_row_id, email };
 }
 
 /* ---------- items ---------- */
@@ -365,13 +392,14 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     try {
-      if (path === "/api/auth/register" && request.method === "POST") return handleRegister(request, env);
-      if (path === "/api/auth/login" && request.method === "POST") return handleLogin(request, env);
-      if (path === "/api/auth/logout" && request.method === "POST") return handleLogout(request, env);
+      /* 旧自前認証エンドポイントは廃止（認証は Firebase Authentication） */
+      if (path === "/api/auth/register" || path === "/api/auth/login" || path === "/api/auth/logout") {
+        return err("Not Found", 404);
+      }
 
       if (path.startsWith("/api/")) {
         const user = await currentUser(request, env);
-        if (!user) return err("ログインが必要です", 401);
+        if (!user) return json({ error: "unauthorized" }, 401);
         if (path === "/api/auth/me" && request.method === "GET") return json(user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
         if (path === "/api/export.csv" && request.method === "GET") return exportCsv(request, env, user);
