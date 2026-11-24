@@ -48,7 +48,7 @@ export function spineTextColor(item) {
 /* 背表紙サイズ: 種別とページ数（prog_total）で変化させる */
 export function spineSize(item) {
   const h = hashCode(item.title || "");
-  if (item.type === "cd") return { width: 20, height: 150 };
+  if (item.type === "cd") return { width: 23, height: 150 };
   if (item.type === "dvd") return { width: 26, height: 185 };
   if (item.type === "other") {
     return { width: 40 + (h % 15), height: 182 + (h % 26) };

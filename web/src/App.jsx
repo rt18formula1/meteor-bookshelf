@@ -49,26 +49,22 @@ export default function App() {
 
   return (
     <div>
-      <header className="topbar">
-        <div className="topbar-inner">
-          <div className="brand">
-            <IconBookLogo size={24} />
-            <span>私の本棚</span>
+      {view !== "home" && (
+        <header className="topbar">
+          <div className="topbar-inner">
+            <div className="brand">
+              <IconBookLogo size={24} />
+              <span>私の本棚</span>
+            </div>
+            <div className="topbar-actions">
+              <span className="total-count">全{totalCount}点</span>
+            </div>
           </div>
-          <div className="topbar-actions">
-            <span className="total-count">全{totalCount}点</span>
-            {view === "home" && (
-              <div className="view-toggle">
-                <button className={`toggle-btn${viewMode === "shelf" ? " active" : ""}`} onClick={() => setViewMode("shelf")}>本棚</button>
-                <button className={`toggle-btn${viewMode === "list" ? " active" : ""}`} onClick={() => setViewMode("list")}>リスト</button>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
+        </header>
+      )}
 
-      <main className="main">
-        {view === "home" && <HomeView viewMode={viewMode} />}
+      <main className={`main${view === "home" ? " main-home" : ""}`}>
+        {view === "home" && <HomeView viewMode={viewMode} setViewMode={setViewMode} />}
         {view === "search" && <SearchView />}
         {view === "scan" && <ScanView />}
         {view === "memos" && <MemosView />}
@@ -76,16 +72,27 @@ export default function App() {
       </main>
 
       <nav className="bottomnav">
-        {NAV.map(({ view: v, label, Icon }) => (
-          <button
-            key={v}
-            className={`nav-item${view === v ? " active" : ""}`}
-            onClick={() => setView(v)}
-          >
-            <Icon size={22} />
-            <span>{label}</span>
-          </button>
-        ))}
+        {NAV.map(({ view: v, label, Icon }) =>
+          v === "scan" ? (
+            <button
+              key={v}
+              className="nav-fab"
+              onClick={() => setView(v)}
+              aria-label={label}
+            >
+              <Icon size={26} />
+            </button>
+          ) : (
+            <button
+              key={v}
+              className={`nav-item${view === v ? " active" : ""}`}
+              onClick={() => setView(v)}
+            >
+              <Icon size={22} />
+              <span>{label}</span>
+            </button>
+          )
+        )}
       </nav>
 
       <ItemDetailModal />
