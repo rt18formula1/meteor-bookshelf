@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="200" viewBox="0 0 600 200" preserveAspectRatio="none">
+  <defs>
+    <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#dbb87f"/>
+      <stop offset="0.35" stop-color="#c99e60"/>
+      <stop offset="0.62" stop-color="#bd8c4e"/>
+      <stop offset="1" stop-color="#d2a968"/>
+    </linearGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.012 0.16" numOctaves="4" seed="7" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.30  0 0 0 0 0.17  0 0 0 0 0.04  0 0 0 0.6 0"/>
+      <feComposite operator="over" in2="SourceGraphic"/>
+    </filter>
+    <filter id="fine" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.02 0.35" numOctaves="2" seed="19" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.42  0 0 0 0 0.27  0 0 0 0 0.10  0 0 0 0.35 0"/>
+      <feComposite operator="over" in2="SourceGraphic"/>
+    </filter>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#2d1a08" stop-opacity="0.14"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="200" fill="url(#base)"/>
+  <rect width="600" height="200" filter="url(#grain)" opacity="0.55"/>
+  <rect width="600" height="200" filter="url(#fine)" opacity="0.4"/>
+  <rect width="600" height="200" fill="url(#sheen)"/>
+</svg>

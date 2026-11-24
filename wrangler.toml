@@ -1,0 +1,16 @@
+name = "bookshelf-app"
+main = "src/index.js"
+compatibility_date = "2025-11-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bookshelf-db"
+# database_id は `wrangler d1 create bookshelf-db` 後に記入する
+
+[[kv_namespaces]]
+binding = "IMAGES"
+# id は `wrangler kv namespace create IMAGES` 後に記入する
