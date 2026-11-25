@@ -598,6 +598,51 @@ async function testNotion(request, env, user) {
   }
 }
 
+/* 既存アイテムをまとめて Notion へ送る一括同期（設定画面のボタンから手動実行）。
+   自動同期は追加・変更のタイミングでのみ働くため、連携前に登録したアイテムは
+   このボタンで送る。トークンと DB ID が保存されていれば有効化フラグに関係なく実行する。 */
+async function syncAllToNotion(request, env, user) {
+  const token = String(user.notion_token || "").trim();
+  const dbId = String(user.notion_db_id || "").trim();
+  if (!token || !dbId) return json({ ok: false, error: "先にトークンとデータベース ID を保存してください" });
+  const origin = new URL(request.url).origin;
+  try {
+    const { db, databaseId } = await resolveNotionDatabase(token, dbId);
+    const dbProps = db.properties || {};
+    const rows = await env.DB.prepare(
+      `SELECT ${ITEM_COLS} FROM items WHERE user_id = ? ORDER BY id ASC`
+    ).bind(user.id).all();
+    const items = rows.results || [];
+    const CAP = 120;
+    const batch = items.slice(0, CAP);
+    let created = 0, updated = 0, failed = 0;
+    for (const item of batch) {
+      try {
+        const properties = buildNotionProperties(dbProps, item, { appUrl: origin, isCreate: !item.notion_page_id });
+        if (item.notion_page_id) {
+          await notionApi(token, "PATCH", `/pages/${item.notion_page_id}`, { properties });
+          updated++;
+        } else {
+          const page = await notionApi(token, "POST", "/pages", { parent: { database_id: databaseId }, properties });
+          if (page && page.id) {
+            await env.DB.prepare("UPDATE items SET notion_page_id = ? WHERE id = ? AND user_id = ?")
+              .bind(page.id, item.id, user.id).run();
+          }
+          created++;
+        }
+      } catch (e) {
+        failed++;
+        console.error(`[notion-sync-all] item=${item.id} failed:`, e && e.message ? e.message : e);
+      }
+      /* Notion API のレート制限（平均 3 req/sec）に配慮 */
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return json({ ok: true, total: items.length, processed: batch.length, created, updated, failed, remaining: items.length - batch.length });
+  } catch (e) {
+    return json({ ok: false, error: (e.code ? `${e.code}: ` : "") + (e.message || String(e)) });
+  }
+}
+
 /* === Notion プロパティマッピング（純粋関数。単体テスト対象） ===
    DB の properties 定義とアイテムから、Notion ページ作成/更新用の
    properties ペイロードを組み立てる。プロパティ名はエイリアス表で照合し、
@@ -810,6 +855,7 @@ export default {
         if (path === "/api/settings" && request.method === "GET") return getUserSettings(env, user);
         if (path === "/api/settings" && request.method === "PUT") return updateUserSettings(request, env, user);
         if (path === "/api/notion/test" && request.method === "POST") return testNotion(request, env, user);
+        if (path === "/api/notion/sync-all" && request.method === "POST") return syncAllToNotion(request, env, user);
         if (path === "/api/items/reorder" && request.method === "PUT") return reorderItems(request, env, user);
         if (path === "/api/labels" && request.method === "GET") return listLabels(env, user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);

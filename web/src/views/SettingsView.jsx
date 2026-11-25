@@ -31,6 +31,8 @@ function NotionCard() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // { ok, message }
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState(null); // { ok, message }
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +104,26 @@ function NotionCard() {
     }
   };
 
+  const syncAll = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const r = await apiJson("/api/notion/sync-all", "POST", {});
+      if (r.ok) {
+        let message = `Notion へ同期しました（新規 ${r.created} 件・更新 ${r.updated} 件${r.failed ? `・失敗 ${r.failed} 件` : ""}）`;
+        if (r.remaining > 0) message += `。残り ${r.remaining} 件がありますので、もう一度押してください`;
+        if (r.total === 0) message = "同期するアイテムがありませんでした";
+        setSyncResult({ ok: r.failed === 0, message });
+      } else {
+        setSyncResult({ ok: false, message: `同期できませんでした: ${r.error || "不明なエラー"}` });
+      }
+    } catch (e) {
+      setSyncResult({ ok: false, message: `同期できませんでした: ${e.message}` });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
     <div className="card">
       <h3>Notion連携</h3>
@@ -164,6 +186,21 @@ function NotionCard() {
         <p className="small" style={{ marginTop: 10, color: testResult.ok ? "#2e6b2e" : "#b03030" }}>
           {testResult.message}
         </p>
+      )}
+      {hasToken && dbId && (
+        <div style={{ marginTop: 14, borderTop: "1px solid #e8dcc8", paddingTop: 12 }}>
+          <p className="muted small" style={{ margin: "0 0 8px" }}>
+            連携する前に登録したアイテムは自動では送られません。下のボタンで、登録済みの全アイテムを Notion へまとめて送れます。
+          </p>
+          <button className="btn-primary" onClick={syncAll} disabled={!loaded || syncing}>
+            {syncing ? "Notion へ同期中…" : "登録済みアイテムを Notion へ一括同期"}
+          </button>
+          {syncResult && (
+            <p className="small" style={{ marginTop: 10, color: syncResult.ok ? "#2e6b2e" : "#b03030" }}>
+              {syncResult.message}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );
