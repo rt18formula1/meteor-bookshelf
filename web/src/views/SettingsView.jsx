@@ -86,7 +86,14 @@ function NotionCard() {
       const body = { notion_db_id: dbId };
       if (tokenInput.trim()) body.notion_token = tokenInput.trim();
       const r = await apiJson("/api/notion/test", "POST", body);
-      if (r.ok) setTestResult({ ok: true, message: `接続できました（データベース: ${r.database_title || "（名称なし）"}）` });
+      if (r.ok) {
+        let message = `接続できました（データベース: ${r.database_title || "（名称なし）"}）`;
+        if (r.resolved_database_id) {
+          setDbId(r.resolved_database_id);
+          message += "。入力された ID はデータソースの ID でしたので、正しいデータベース ID に置き換えました。このまま「保存」を押してください";
+        }
+        setTestResult({ ok: true, message });
+      }
       else setTestResult({ ok: false, message: `接続できませんでした: ${r.error || "不明なエラー"}` });
     } catch (e) {
       setTestResult({ ok: false, message: `接続できませんでした: ${e.message}` });

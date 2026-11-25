@@ -221,7 +221,7 @@ async function createItem(request, env, user, ctx) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
   ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
   const item = await env.DB.prepare(`SELECT ${ITEM_COLS}, 0 AS memo_count FROM items WHERE id = ?`).bind(res.meta.last_row_id).first();
-  if (ctx) ctx.waitUntil(syncToNotion(env, user, item, "create"));
+  if (ctx) ctx.waitUntil(syncToNotion(env, user, item, "create", new URL(request.url).origin));
   return json(item, 201);
 }
 
@@ -240,7 +240,7 @@ async function updateItem(request, env, user, id, ctx) {
     `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
   ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
   const updated = await getItem(env, user, id);
-  if (ctx) ctx.waitUntil(syncToNotion(env, user, updated, "update"));
+  if (ctx) ctx.waitUntil(syncToNotion(env, user, updated, "update", new URL(request.url).origin));
   return json(updated);
 }
 
@@ -533,7 +533,7 @@ async function updateUserSettings(request, env, user) {
 }
 
 /* ---------- Notion API ---------- */
-async function notionApi(token, method, path, body) {
+async function notionApi(token, method, path, body, version) {
   /* ネットワークが応答しない場合にリクエストを吊るさないためのタイムアウト */
   const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
     ? AbortSignal.timeout(15000)
@@ -542,7 +542,7 @@ async function notionApi(token, method, path, body) {
     method,
     headers: {
       "Authorization": `Bearer ${token}`,
-      "Notion-Version": "2022-06-28",
+      "Notion-Version": version || "2022-06-28",
       "Content-Type": "application/json",
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -558,6 +558,26 @@ async function notionApi(token, method, path, body) {
   return data;
 }
 
+/* 入力された ID がデータベースとして見つからない場合、データソース ID と
+   間違えている可能性があるため、新 API でデータソースから親 DB を特定する */
+async function resolveNotionDatabase(token, id) {
+  try {
+    const db = await notionApi(token, "GET", `/databases/${id}`);
+    return { db, databaseId: id, resolvedFromDataSource: false };
+  } catch (e) {
+    if (e.code !== "object_not_found") throw e;
+    try {
+      const ds = await notionApi(token, "GET", `/data_sources/${id}`, undefined, "2025-09-03");
+      const parentId = ds && ds.parent && ds.parent.database_id;
+      if (parentId) {
+        const db = await notionApi(token, "GET", `/databases/${parentId}`);
+        return { db, databaseId: parentId, resolvedFromDataSource: true };
+      }
+    } catch (e2) { /* 特定できなければ元のエラーを投げる */ }
+    throw e;
+  }
+}
+
 /* 接続テスト: 保存済み（または body で渡された）token + db_id でデータベースを取得する */
 async function testNotion(request, env, user) {
   const b = await request.json().catch(() => ({}));
@@ -566,11 +586,15 @@ async function testNotion(request, env, user) {
   if (!token) return json({ ok: false, error: "インテグレーショントークンが設定されていません" });
   if (!dbId) return json({ ok: false, error: "データベースIDが設定されていません" });
   try {
-    const db = await notionApi(token, "GET", `/databases/${dbId}`);
+    const { db, databaseId, resolvedFromDataSource } = await resolveNotionDatabase(token, dbId);
     const title = (db.title || []).map((t) => t.plain_text || "").join("");
-    return json({ ok: true, database_title: title });
+    return json({ ok: true, database_title: title, resolved_database_id: resolvedFromDataSource ? databaseId : "" });
   } catch (e) {
-    return json({ ok: false, error: (e.code ? `${e.code}: ` : "") + (e.message || String(e)) });
+    let msg = (e.code ? `${e.code}: ` : "") + (e.message || String(e));
+    if (e.code === "object_not_found") {
+      msg += "（データベースの ID が正しいか、そのデータベースにインテグレーションが「コネクトの追加」で接続されているかをご確認ください）";
+    }
+    return json({ ok: false, error: msg });
   }
 }
 
@@ -587,10 +611,10 @@ const NOTION_FIELD_ALIASES = [
   ["catno", ["規格品番", "品番", "型番"]],
   ["edition", ["版", "仕様", "エディション"]],
   ["category", ["カテゴリー", "カテゴリ", "ジャンル"]],
-  ["location", ["保有場所", "場所", "ロケーション"]],
+  ["location", ["保有場所", "保管場所", "場所", "ロケーション"]],
   ["type", ["種別", "タイプ"]],
   ["status", ["状態", "ステータス", "進捗状況"]],
-  ["price", ["価格", "定価"]],
+  ["price", ["価格", "定価", "購入価格"]],
   ["created_at", ["登録日", "追加日"]],
 ];
 
@@ -628,7 +652,8 @@ function notionPropValue(propType, field, item) {
   }
 }
 
-function buildNotionProperties(dbProps, item) {
+function buildNotionProperties(dbProps, item, opts) {
+  const o = opts || {};
   const out = {};
   const entries = Object.entries(dbProps || {});
   /* title 型プロパティ（名前不問）にはアイテムのタイトルを入れる */
@@ -645,6 +670,26 @@ function buildNotionProperties(dbProps, item) {
     const val = notionPropValue(def && def.type, field, item);
     if (val !== undefined) out[propName] = val;
   }
+  /* 専用プロパティ: アプリ内ID（アイテム ID）・アプリURL（アプリへのリンク） */
+  const appIdHit = entries.find(([name]) => String(name).trim() === "アプリ内ID");
+  if (appIdHit && appIdHit[1] && appIdHit[1].type === "rich_text") {
+    out[appIdHit[0]] = { rich_text: [{ type: "text", text: { content: String(item.id) } }] };
+  }
+  const appUrlHit = entries.find(([name]) => String(name).trim() === "アプリURL");
+  if (appUrlHit && appUrlHit[1] && appUrlHit[1].type === "url" && o.appUrl) {
+    out[appUrlHit[0]] = { url: o.appUrl };
+  }
+  /* 所有状態は新規追加時のみ「所有中」にする（更新時は Notion 側の変更を上書きしない） */
+  if (o.isCreate) {
+    const ownHit = entries.find(([name]) => String(name).trim() === "所有状態");
+    if (ownHit && ownHit[1] && (ownHit[1].type === "select" || ownHit[1].type === "status")) {
+      const def = ownHit[1];
+      const options = ((def[def.type] || {}).options || []).map((x) => x && x.name);
+      if (options.includes("所有中")) {
+        out[ownHit[0]] = def.type === "select" ? { select: { name: "所有中" } } : { status: { name: "所有中" } };
+      }
+    }
+  }
   return out;
 }
 /* === /Notion プロパティマッピング === */
@@ -652,7 +697,7 @@ function buildNotionProperties(dbProps, item) {
 /* アイテムの作成・更新・削除を Notion へ一方向同期する。
    連携が無効・未設定なら何もしない。失敗しても呼び出し側（本体処理）は
    絶対に止めないよう、ここで例外を握ってログに残す。 */
-async function syncToNotion(env, user, item, action) {
+async function syncToNotion(env, user, item, action, origin) {
   try {
     if (!user || !item) return;
     if (!user.notion_enabled) return;
@@ -665,12 +710,12 @@ async function syncToNotion(env, user, item, action) {
       }
       return;
     }
-    const db = await notionApi(token, "GET", `/databases/${dbId}`);
-    const properties = buildNotionProperties(db.properties || {}, item);
+    const { db, databaseId } = await resolveNotionDatabase(token, dbId);
+    const properties = buildNotionProperties(db.properties || {}, item, { appUrl: origin || "", isCreate: !item.notion_page_id });
     if (item.notion_page_id) {
       await notionApi(token, "PATCH", `/pages/${item.notion_page_id}`, { properties });
     } else {
-      const page = await notionApi(token, "POST", "/pages", { parent: { database_id: dbId }, properties });
+      const page = await notionApi(token, "POST", "/pages", { parent: { database_id: databaseId }, properties });
       if (page && page.id) {
         await env.DB.prepare("UPDATE items SET notion_page_id = ? WHERE id = ? AND user_id = ?")
           .bind(page.id, item.id, user.id).run();
