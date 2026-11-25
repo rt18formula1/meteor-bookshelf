@@ -12,6 +12,12 @@ export default function ScanView() {
   const [lookupStatus, setLookupStatus] = useState("");
   const [results, setResults] = useState([]);
   const [ocrBusy, setOcrBusy] = useState(false);
+  /* 雑誌（491始まりの定期刊行物JANコード）: バーコードからは号数・年・価格だけが
+     導出でき、タイトルは取得できないため、タイトル検索または手入力で補う */
+  const [magazine, setMagazine] = useState(null);
+  const [titleQuery, setTitleQuery] = useState("");
+  const [titleResults, setTitleResults] = useState([]);
+  const [titleStatus, setTitleStatus] = useState("");
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const timerRef = useRef(null);
@@ -23,10 +29,21 @@ export default function ScanView() {
     if (!c) return;
     setLookupStatus("検索中…");
     setResults([]);
+    setMagazine(null);
+    setTitleResults([]);
+    setTitleStatus("");
     try {
       const data = await api(`/api/lookup?code=${encodeURIComponent(c)}`);
       if (!data.results.length) {
         setLookupStatus("見つかりませんでした。手動登録をお試しください。");
+        return;
+      }
+      /* 雑誌JANコード（491始まり）はタイトルが空で返る。号数・価格は導出済みなので
+         専用パネルでタイトル検索または手入力に進む（汎用の結果一覧には載せない） */
+      const first = data.results[0];
+      if (first && first.type === "magazine") {
+        setMagazine(first);
+        setLookupStatus("雑誌のバーコードを読み取りました。タイトルを検索するか、手入力で登録してください。");
         return;
       }
       setLookupStatus(`${data.results.length}件見つかりました。タップで登録フォームに反映します。`);
@@ -36,11 +53,51 @@ export default function ScanView() {
     }
   };
 
+  /* 雑誌のタイトル検索（NDLサーチ）。候補を選ぶと雑誌のJAN・号数・価格と合わせてフォームに反映する */
+  const doTitleLookup = async (rawTitle) => {
+    const q = String(rawTitle || "").trim();
+    if (!q) return;
+    setTitleStatus("タイトルで検索中…");
+    setTitleResults([]);
+    try {
+      const data = await api(`/api/lookup?title=${encodeURIComponent(q)}`);
+      if (!data.results.length) {
+        setTitleStatus("見つかりませんでした。タイトルを変えるか、手入力で登録してください。");
+        return;
+      }
+      setTitleStatus(`${data.results.length}件見つかりました。タップで登録フォームに反映します。`);
+      setTitleResults(data.results);
+    } catch (e) {
+      setTitleStatus("検索に失敗しました: " + e.message);
+    }
+  };
+
+  /* 雑誌の登録フォームを開く。タイトル候補があればその書誌情報を使い、
+     JANコード・号数・価格はバーコードから導出した値を優先する */
+  const openMagazineForm = (candidate) => {
+    if (!magazine) return;
+    openForm({
+      ...(candidate || {}),
+      type: "magazine",
+      title: (candidate && candidate.title) || "",
+      creator: (candidate && candidate.creator) || "",
+      publisher: (candidate && candidate.publisher) || "",
+      isbn: magazine.isbn,
+      catno: "",
+      edition: magazine.edition || (candidate && candidate.edition) || "",
+      price: magazine.price || (candidate && candidate.price) || "",
+      cover_url: (candidate && candidate.cover_url) || "",
+    });
+  };
+
   const doCatnoLookup = async (rawCatno) => {
     const c = String(rawCatno || "").trim();
     if (!c) return;
     setLookupStatus("品番で検索中…");
     setResults([]);
+    setMagazine(null);
+    setTitleResults([]);
+    setTitleStatus("");
     try {
       const data = await api(`/api/lookup?catno=${encodeURIComponent(c)}`);
       if (!data.results.length) {
@@ -168,7 +225,7 @@ export default function ScanView() {
             <input
               type="text"
               inputMode="numeric"
-              placeholder="9784... / 4988..."
+              placeholder="9784... / 4988... / 4912...（雑誌）"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); doLookup(code); } }}
@@ -203,6 +260,54 @@ export default function ScanView() {
             </div>
           ))}
         </div>
+        {magazine && (
+          <div>
+            <div className="divider" />
+            <p className="muted small">
+              雑誌として認識しました。バーコードからはタイトルが取得できないため、タイトルを検索するか手入力で登録してください。
+            </p>
+            <div className="lookup-card">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="list-title">雑誌（タイトル未入力）</div>
+                <div className="list-sub">
+                  {magazine.source} ／ {TYPE_LABEL[magazine.type] || ""}
+                  {magazine.isbn ? ` ／ JAN ${magazine.isbn}` : ""}
+                  {magazine.edition ? ` ／ ${magazine.edition}` : ""}
+                  {magazine.price ? ` ／ ¥${Number(magazine.price).toLocaleString("ja-JP")}` : ""}
+                </div>
+              </div>
+            </div>
+            <label>タイトルを検索
+              <div className="row-gap">
+                <input
+                  type="text"
+                  placeholder="例: 週刊少年ジャンプ"
+                  value={titleQuery}
+                  onChange={(e) => setTitleQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); doTitleLookup(titleQuery); } }}
+                />
+                <button className="btn-secondary" onClick={() => doTitleLookup(titleQuery)}>検索</button>
+              </div>
+            </label>
+            {titleStatus && <p className="muted small">{titleStatus}</p>}
+            <div>
+              {titleResults.map((r, i) => (
+                <div className="lookup-card" key={i} onClick={() => openMagazineForm(r)}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="list-title">{r.title}</div>
+                    <div className="list-sub">{r.creator || ""} ／ {r.publisher || ""} ／ {r.source}</div>
+                  </div>
+                  <button className="btn-primary btn-small">登録</button>
+                </div>
+              ))}
+            </div>
+            <div className="row-gap wrap" style={{ marginTop: 8 }}>
+              <button className="btn-secondary" onClick={() => openMagazineForm(null)}>
+                <IconEdit size={16} /> タイトルを手入力で登録
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="card">

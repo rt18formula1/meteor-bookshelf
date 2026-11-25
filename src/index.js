@@ -191,7 +191,7 @@ async function listItems(request, env, user) {
   let where = "WHERE user_id = ?";
   const binds = [user.id];
   if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
-  if (type && ["book", "cd", "dvd", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
+  if (type && ["book", "cd", "dvd", "magazine", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
   if (category) { where += " AND category = ?"; binds.push(category); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
@@ -235,7 +235,7 @@ async function listLabels(env, user) {
 
 function validItemBody(b) {
   const out = {};
-  out.type = ["book", "cd", "dvd", "other"].includes(b.type) ? b.type : "book";
+  out.type = ["book", "cd", "dvd", "magazine", "other"].includes(b.type) ? b.type : "book";
   out.title = String(b.title || "").trim();
   if (!out.title) return null;
   out.creator = String(b.creator || "").trim();
@@ -507,6 +507,81 @@ async function lookupMusicBrainzByCatno(raw) {
   }
   return results.slice(0, 2);
 }
+/* 雑誌（定期刊行物JANコード）のパース。
+   13桁: 491 + Y1(年号十の位) + 雑誌コード5桁 + 号数V1V2(2桁) + Y2(年号一の位) + チェックデジット。
+   2026年1月発行分から4桁目が年号になるため、判定は ^491（^4910 決め打ち禁止）。
+   アドオン5桁（あれば）: 0 + 本体価格4桁。10000円以上は0000で価格不明。
+   JANにはタイトル・出版社・ISSNは入っていないため、タイトルは取得できない */
+function parseMagazineJan(code) {
+  const digits = String(code || "").replace(/[^\d]/g, "");
+  const m = digits.match(/^491(\d)(\d{5})(\d{2})(\d)(\d)(\d{5})?$/);
+  if (!m) return null;
+  const y1 = Number(m[1]);
+  const y2 = Number(m[4]);
+  let year;
+  if (y1 === 0) {
+    /* 旧仕様（2025年12月号まで）は4桁目が0固定で年号の十の位がないため、
+       一の位だけでは年代が曖昧。現在以前で最も新しい該当年にする
+       （例：2026年時点で Y2=5 → 2025年、Y2=6 → 2026年）。
+       2000 + Y1*10 + Y2 のままでは2025年号が2005年になってしまうため */
+    const now = new Date().getFullYear();
+    year = now - ((now - y2) % 10);
+  } else {
+    year = 2000 + y1 * 10 + y2;
+  }
+  const issue = Number(m[3]);
+  let edition = "";
+  if (issue >= 1 && issue <= 12) edition = `${year}年${issue}月号`;
+  else if (issue > 12) edition = `第${issue}号`;
+  else edition = `${year}年`;
+  let price = "";
+  if (m[6] && m[6].slice(1) !== "0000") price = String(Number(m[6].slice(1)));
+  return { edition, price, year, issue };
+}
+
+/* 雑誌JANコードの検索結果。タイトルはJANから取得できないため空で返し、
+   フロントでタイトル検索または手入力で補う。号数・年・価格はJANから導出する */
+function lookupMagazine(code) {
+  const parsed = parseMagazineJan(code);
+  if (!parsed) return null;
+  const digits = String(code || "").replace(/[^\d]/g, "");
+  return {
+    title: "", creator: "", publisher: "",
+    isbn: digits, catno: "", edition: parsed.edition, price: parsed.price,
+    cover_url: "", type: "magazine", source: "雑誌JAN",
+  };
+}
+
+/* NDL OpenSearchでタイトル検索する（雑誌のタイトル検索用）。
+   失敗（非200・429・パース失敗）は空配列を返す。例外は投げない */
+async function lookupNDLByTitle(title) {
+  const q = String(title || "").trim();
+  if (!q) return [];
+  try {
+    const r = await fetch(`https://ndlsearch.ndl.go.jp/api/opensearch?title=${encodeURIComponent(q)}`);
+    if (!r.ok) return [];
+    const xml = await r.text();
+    const parts = xml.split("<item>").slice(1);
+    const results = [];
+    for (const part of parts) {
+      const itemXml = part.split("</item>")[0];
+      const t = xmlTag(itemXml, "title");
+      if (!t) continue;
+      results.push({
+        title: t,
+        creator: xmlTag(itemXml, "dc:creator"),
+        publisher: xmlTag(itemXml, "dc:publisher"),
+        isbn: "", catno: "", edition: "", price: "",
+        cover_url: "", type: "magazine", source: "NDLサーチ",
+      });
+      if (results.length >= 5) break;
+    }
+    return results;
+  } catch (_) {
+    return [];
+  }
+}
+
 async function handleLookup(request) {
   const params = new URL(request.url).searchParams;
   const catno = (params.get("catno") || "").trim();
@@ -515,8 +590,19 @@ async function handleLookup(request) {
     const results = await lookupMusicBrainzByCatno(catno);
     return json({ results, catno });
   }
+  /* タイトル検索（雑誌用）。NDL OpenSearchの title パラメータで検索する */
+  const title = (params.get("title") || "").trim();
+  if (title) {
+    const results = await lookupNDLByTitle(title);
+    return json({ results, title });
+  }
   const code = (params.get("code") || "").replace(/[-\s]/g, "");
   if (!code || code.length < 8) return err("コードが短すぎます");
+  /* 雑誌（定期刊行物JANコード）は ^491 で判定する。2026年以降は4912...等のため ^4910 決め打ち禁止 */
+  if (/^491/.test(code)) {
+    const hit = lookupMagazine(code);
+    return json({ results: hit ? [hit] : [], code });
+  }
   const isBookCode = /^(978|979)/.test(code);
   const chain = isBookCode
     ? [lookupOpenBD, lookupGoogleBooks, lookupNDL, lookupMusicBrainz]
@@ -959,7 +1045,7 @@ async function syncAllToNotion(request, env, user) {
    DB の properties 定義とアイテムから、Notion ページ作成/更新用の
    properties ペイロードを組み立てる。プロパティ名はエイリアス表で照合し、
    値の形はプロパティの型に合わせる。マッチしないプロパティには触らない。 */
-const NOTION_TYPE_LABEL = { book: "書籍", cd: "CD", dvd: "DVD", other: "その他" };
+const NOTION_TYPE_LABEL = { book: "書籍", cd: "CD", dvd: "DVD", magazine: "雑誌", other: "その他" };
 const NOTION_STATUS_LABEL = { unread: "未読", reading: "読み進め中", done: "読了" };
 const NOTION_FIELD_ALIASES = [
   ["creator", ["作者", "著者", "クリエイター", "アーティスト"]],
@@ -1096,7 +1182,7 @@ function buildItemFilter(request) {
   let where = "WHERE user_id = ?";
   const binds = [];
   if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
-  if (type && ["book", "cd", "dvd", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
+  if (type && ["book", "cd", "dvd", "magazine", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
   if (category) { where += " AND category = ?"; binds.push(category); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";

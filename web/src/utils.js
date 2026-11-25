@@ -1,11 +1,12 @@
-export const TYPE_LABEL = { book: "書籍", cd: "CD", dvd: "DVD", other: "その他" };
-export const TYPE_BADGE = { book: "BOOK", cd: "CD", dvd: "DVD", other: "ITEM" };
+export const TYPE_LABEL = { book: "書籍", cd: "CD", dvd: "DVD", magazine: "雑誌", other: "その他" };
+export const TYPE_BADGE = { book: "BOOK", cd: "CD", dvd: "DVD", magazine: "MAG", other: "ITEM" };
 export const STATUS_LABEL = { unread: "未読", reading: "読み進め中", done: "読了" };
 export const TYPE_FILTERS = [
   { value: "", label: "すべて" },
   { value: "book", label: "書籍" },
   { value: "cd", label: "CD" },
   { value: "dvd", label: "DVD" },
+  { value: "magazine", label: "雑誌" },
   { value: "other", label: "その他" },
 ];
 
@@ -50,6 +51,7 @@ export function spineSize(item) {
   const h = hashCode(item.title || "");
   if (item.type === "cd") return { width: 23, height: 150 };
   if (item.type === "dvd") return { width: 26, height: 185 };
+  if (item.type === "magazine") return { width: 54 + (h % 12), height: 205 + (h % 28) };
   if (item.type === "other") {
     return { width: 40 + (h % 15), height: 182 + (h % 26) };
   }

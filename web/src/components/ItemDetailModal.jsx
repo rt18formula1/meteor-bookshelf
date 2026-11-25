@@ -225,6 +225,7 @@ export default function ItemDetailModal() {
                   <option value="book">書籍</option>
                   <option value="cd">CD</option>
                   <option value="dvd">DVD</option>
+                  <option value="magazine">雑誌</option>
                   <option value="other">その他</option>
                 </select>
               </label>

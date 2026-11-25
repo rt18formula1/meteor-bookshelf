@@ -91,6 +91,7 @@ export default function ItemFormModal() {
               <option value="book">書籍</option>
               <option value="cd">CD</option>
               <option value="dvd">DVD</option>
+              <option value="magazine">雑誌</option>
               <option value="other">その他</option>
             </select>
           </label>
@@ -104,7 +105,7 @@ export default function ItemFormModal() {
           <label className="span2">タイトル<input type="text" value={fields.title} onChange={set("title")} required /></label>
           <label>著者 / アーティスト<input type="text" value={fields.creator} onChange={set("creator")} /></label>
           <label>出版社 / レーベル<input type="text" value={fields.publisher} onChange={set("publisher")} /></label>
-          <label>ISBN / バーコード<input type="text" value={fields.isbn} onChange={set("isbn")} /></label>
+          <label>{fields.type === "magazine" ? "JANコード" : "ISBN / バーコード"}<input type="text" value={fields.isbn} onChange={set("isbn")} placeholder={fields.type === "magazine" ? "例: 4912123450660" : ""} /></label>
           <label>規格品番（CD/DVD/BD）<input type="text" value={fields.catno} onChange={set("catno")} placeholder="例: VICL-12345" /></label>
           <label>版・仕様<input type="text" value={fields.edition} onChange={set("edition")} placeholder="例: 初回限定盤" /></label>
           <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
