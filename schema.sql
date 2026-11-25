@@ -9,6 +9,10 @@ CREATE TABLE IF NOT EXISTS users (
   notion_enabled INTEGER NOT NULL DEFAULT 0, -- Notion 連携の有効/無効
   sheets_id TEXT NOT NULL DEFAULT '',      -- Google Sheets 書き出し先スプレッドシートID
   sheets_url TEXT NOT NULL DEFAULT '',     -- 同 URL
+  sub_period_end INTEGER NOT NULL DEFAULT 0, -- エクスポートプランの権利終了時刻（unix秒）。4102444800 以上は無期限
+  sub_source TEXT NOT NULL DEFAULT '',       -- 権利の取得方法: stripe | code | admin
+  stripe_customer_id TEXT NOT NULL DEFAULT '',
+  stripe_subscription_id TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid);
@@ -55,3 +59,19 @@ CREATE TABLE IF NOT EXISTS memos (
 );
 CREATE INDEX IF NOT EXISTS idx_memos_user ON memos(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_memos_item ON memos(item_id, created_at);
+
+-- アクティベーションコード。平文は保存せず SHA-256 ハッシュのみ。
+-- duration_days が NULL のコードは「無期限」（償還時に sub_period_end へセンチネル値を入れる）
+CREATE TABLE IF NOT EXISTS license_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_hash TEXT NOT NULL UNIQUE,
+  code_hint TEXT NOT NULL DEFAULT '',       -- 末尾4文字（管理画面での識別用）
+  duration_days INTEGER,                    -- 付与日数。NULL は無期限
+  note TEXT NOT NULL DEFAULT '',            -- 発行先メモ（友人への配布など）
+  created_at INTEGER NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',      -- 発行した管理者のメール
+  redeemed_by INTEGER REFERENCES users(id), -- NULL は未使用
+  redeemed_at INTEGER,
+  revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_license_codes_redeemed_by ON license_codes(redeemed_by);

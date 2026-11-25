@@ -8,6 +8,8 @@ import SearchView from "./views/SearchView.jsx";
 import ScanView from "./views/ScanView.jsx";
 import MemosView from "./views/MemosView.jsx";
 import SettingsView from "./views/SettingsView.jsx";
+import AdminView from "./views/AdminView.jsx";
+import PromoView from "./views/PromoView.jsx";
 import ItemDetailModal from "./components/ItemDetailModal.jsx";
 import ItemFormModal from "./components/ItemFormModal.jsx";
 import CoverEditorModal from "./components/CoverEditorModal.jsx";
@@ -34,6 +36,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* /lp は公開プロモーションページ（ログイン不要） */
+  if (window.location.pathname === "/lp") {
+    return <PromoView />;
+  }
+
   if (user === undefined) {
     return (
       <div className="boot-screen">
@@ -45,6 +52,11 @@ export default function App() {
 
   if (user === null) {
     return <LoginScreen />;
+  }
+
+  /* /admin は管理画面（単独ページ）。権限の判定は API 側で行う */
+  if (window.location.pathname === "/admin") {
+    return <AdminView />;
   }
 
   return (

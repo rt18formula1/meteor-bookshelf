@@ -13,6 +13,42 @@ function err(message, status = 400) {
   return json({ error: message }, status);
 }
 
+/* ---------- subscription（エクスポートプラン / 有料化） ---------- */
+/* 管理者メール。このアカウントはサブスクリプション状態によらず常時すべての機能を使える */
+const ADMIN_EMAIL = "rb18vcarb@gmail.com";
+
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
+}
+function isAdminUser(user) {
+  return !!user && String(user.email || "").toLowerCase() === ADMIN_EMAIL;
+}
+/* 外部エクスポート（有料機能）の利用権利: 管理者は常時可、それ以外は期間内のみ */
+function hasExportAccess(user) {
+  if (!user) return false;
+  if (isAdminUser(user)) return true;
+  return (user.sub_period_end || 0) > nowSec();
+}
+function subRequiredResponse() {
+  return json({ error: "この機能はエクスポートプラン（有料）が必要です", code: "subscription_required" }, 403);
+}
+/* 設定 API で返すサブスクリプション状態 */
+function subscriptionInfo(user) {
+  const periodEnd = (user && user.sub_period_end) || 0;
+  return {
+    active: hasExportAccess(user),
+    period_end: periodEnd,
+    unlimited: isUnlimitedEnd(periodEnd),
+    source: (user && user.sub_source) || "",
+    is_admin: isAdminUser(user),
+  };
+}
+/* 無期限を表すセンチネル値（2100-01-01 UTC）。sub_period_end がこれ以上なら「無期限」として扱う */
+const SUB_UNLIMITED_END = 4102444800;
+function isUnlimitedEnd(periodEnd) {
+  return (periodEnd || 0) >= SUB_UNLIMITED_END;
+}
+
 /* ---------- auth (Firebase ID token verification) ---------- */
 function b64urlToBytes(s) {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=");
@@ -102,8 +138,8 @@ async function currentUser(request, env) {
   if (!payload) return null;
   const uid = payload.sub;
   const email = String(payload.email).toLowerCase();
-  /* Notion 連携設定も含めて返す（内部利用のみ。API レスポンスに出す場合は呼び出し側で絞ること） */
-  const cols = "id, email, notion_token, notion_db_id, notion_enabled, sheets_id, sheets_url";
+  /* Notion 連携設定・サブスクリプション状態も含めて返す（内部利用のみ。API レスポンスに出す場合は呼び出し側で絞ること） */
+  const cols = "id, email, notion_token, notion_db_id, notion_enabled, sheets_id, sheets_url, sub_period_end, sub_source, stripe_customer_id, stripe_subscription_id";
   let user = await env.DB.prepare(`SELECT ${cols} FROM users WHERE firebase_uid = ?`).bind(uid).first();
   if (user) return user;
   user = await env.DB.prepare(`SELECT ${cols} FROM users WHERE email = ?`).bind(email).first();
@@ -114,7 +150,7 @@ async function currentUser(request, env) {
   const res = await env.DB.prepare(
     "INSERT INTO users (email, pass_hash, salt, firebase_uid, created_at) VALUES (?, '', '', ?, ?)"
   ).bind(email, uid, Math.floor(Date.now() / 1000)).run();
-  return { id: res.meta.last_row_id, email, notion_token: "", notion_db_id: "", notion_enabled: 0, sheets_id: "", sheets_url: "" };
+  return { id: res.meta.last_row_id, email, notion_token: "", notion_db_id: "", notion_enabled: 0, sheets_id: "", sheets_url: "", sub_period_end: 0, sub_source: "", stripe_customer_id: "", stripe_subscription_id: "" };
 }
 
 /* ---------- items ---------- */
@@ -505,11 +541,14 @@ async function getUserSettings(env, user) {
     notion_enabled: !!((row && row.notion_enabled) || 0),
     has_notion_token: !!String((row && row.notion_token) || "").trim(),
     sheets_url: (row && row.sheets_url) || "",
+    subscription: subscriptionInfo(user),
   });
 }
 
 async function updateUserSettings(request, env, user) {
   const b = await request.json().catch(() => ({}));
+  /* Notion 同期の有効化はエクスポートプラン（有料）が必要。無効化はいつでも可 */
+  if (b.notion_enabled === true && !hasExportAccess(user)) return subRequiredResponse();
   const sets = [];
   const binds = [];
   if (b.clear_notion_token === true) {
@@ -531,6 +570,270 @@ async function updateUserSettings(request, env, user) {
     await env.DB.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).bind(...binds, user.id).run();
   }
   return getUserSettings(env, user);
+}
+
+/* ---------- アクティベーションコード ---------- */
+/* 紛らわしい文字（0/O/1/I/L）を除いた英数字でコードを生成する */
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+function generateLicenseCodePlain() {
+  const bytes = new Uint8Array(18);
+  crypto.getRandomValues(bytes);
+  const groups = [];
+  let i = 0;
+  for (let g = 0; g < 3; g++) {
+    let s = "";
+    for (let j = 0; j < 6; j++) s += CODE_ALPHABET[bytes[i++] % CODE_ALPHABET.length];
+    groups.push(s);
+  }
+  return "MBSH-" + groups.join("-");
+}
+/* 照合用に正規化する（大文字化し、ハイフンと空白を取り除く） */
+function normalizeLicenseCode(raw) {
+  return String(raw || "").toUpperCase().replace(/[\s-]+/g, "");
+}
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/* コードの償還: 未使用・未失効なら期間を延長する。失敗理由は漏らさず一律の文言にする */
+async function redeemLicense(request, env, user) {
+  const fail = () => json({ ok: false, error: "コードが無効です" });
+  const b = await request.json().catch(() => ({}));
+  const normalized = normalizeLicenseCode(b.code);
+  if (!normalized || normalized.length < 8) return fail();
+  const hash = await sha256Hex(normalized);
+  const row = await env.DB.prepare("SELECT * FROM license_codes WHERE code_hash = ?").bind(hash).first();
+  if (!row || row.revoked || row.redeemed_by) return fail();
+  const now = nowSec();
+  let newEnd;
+  if (row.duration_days === null || row.duration_days === undefined) {
+    /* duration_days が NULL のコードは無期限 */
+    newEnd = SUB_UNLIMITED_END;
+  } else {
+    const days = parseInt(row.duration_days) || 0;
+    if (days < 1) return fail();
+    newEnd = Math.max(now, user.sub_period_end || 0) + days * 86400;
+  }
+  /* redeemed_by が NULL の行だけを更新し、二重利用を防ぐ */
+  const upd = await env.DB.prepare(
+    "UPDATE license_codes SET redeemed_by = ?, redeemed_at = ? WHERE id = ? AND redeemed_by IS NULL AND revoked = 0"
+  ).bind(user.id, now, row.id).run();
+  if (!upd.meta || upd.meta.changes === 0) return fail();
+  await env.DB.prepare("UPDATE users SET sub_period_end = ?, sub_source = 'code' WHERE id = ?").bind(newEnd, user.id).run();
+  return json({ ok: true, sub_period_end: newEnd });
+}
+
+/* ---------- 管理 API（管理者メールのみ） ---------- */
+function requireAdmin(user) {
+  return isAdminUser(user) ? null : json({ error: "権限がありません" }, 403);
+}
+
+async function adminListUsers(env, user) {
+  const denied = requireAdmin(user);
+  if (denied) return denied;
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.email, u.sub_period_end, u.sub_source,
+            (SELECT COUNT(*) FROM items i WHERE i.user_id = u.id) AS item_count
+     FROM users u ORDER BY u.id ASC`
+  ).all();
+  return json({ users: rows.results || [] });
+}
+
+async function adminGrant(request, env, user, id) {
+  const denied = requireAdmin(user);
+  if (denied) return denied;
+  const b = await request.json().catch(() => ({}));
+  const target = await env.DB.prepare("SELECT id, sub_period_end FROM users WHERE id = ?").bind(id).first();
+  if (!target) return err("ユーザーが見つかりません", 404);
+  let newEnd;
+  if (b.unlimited === true) {
+    /* 無期限付与はセンチネル値を入れる */
+    newEnd = SUB_UNLIMITED_END;
+  } else {
+    const days = Math.min(3650, Math.max(1, parseInt(b.days) || 0));
+    if (!days) return err("日数が不正です");
+    newEnd = Math.max(nowSec(), target.sub_period_end || 0) + days * 86400;
+    if (newEnd > SUB_UNLIMITED_END) newEnd = SUB_UNLIMITED_END;
+  }
+  await env.DB.prepare("UPDATE users SET sub_period_end = ?, sub_source = 'admin' WHERE id = ?").bind(newEnd, id).run();
+  return json({ ok: true, sub_period_end: newEnd });
+}
+
+async function adminRevokeSub(env, user, id) {
+  const denied = requireAdmin(user);
+  if (denied) return denied;
+  await env.DB.prepare("UPDATE users SET sub_period_end = 0 WHERE id = ?").bind(id).run();
+  return json({ ok: true });
+}
+
+async function adminCreateCodes(request, env, user) {
+  const denied = requireAdmin(user);
+  if (denied) return denied;
+  const b = await request.json().catch(() => ({}));
+  const count = Math.min(100, Math.max(1, parseInt(b.count) || 0));
+  /* duration_days が null（または unlimited: true）の場合は無期限コードとして発行する */
+  const unlimited = b.unlimited === true || b.duration_days === null;
+  const durationDays = unlimited ? null : Math.min(3650, Math.max(1, parseInt(b.duration_days) || 0));
+  if (!count || (!unlimited && !durationDays)) return err("個数と期間を指定してください");
+  const note = String(b.note || "").slice(0, 200);
+  const now = nowSec();
+  const plains = [];
+  const stmts = [];
+  for (let i = 0; i < count; i++) {
+    const plain = generateLicenseCodePlain();
+    const hash = await sha256Hex(normalizeLicenseCode(plain));
+    plains.push(plain);
+    stmts.push(env.DB.prepare(
+      "INSERT INTO license_codes (code_hash, code_hint, duration_days, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(hash, plain.slice(-4), durationDays, note, now, user.email));
+  }
+  await env.DB.batch(stmts);
+  /* 平文コードはこの応答でのみ返す（DB にはハッシュしか残らない） */
+  return json({ ok: true, codes: plains });
+}
+
+async function adminListCodes(env, user) {
+  const denied = requireAdmin(user);
+  if (denied) return denied;
+  const rows = await env.DB.prepare(
+    `SELECT c.id, c.code_hint, c.duration_days, c.note, c.created_at, c.created_by,
+            c.redeemed_at, c.revoked, u.email AS redeemed_by_email
+     FROM license_codes c LEFT JOIN users u ON u.id = c.redeemed_by
+     ORDER BY c.id DESC LIMIT 500`
+  ).all();
+  return json({ codes: rows.results || [] });
+}
+
+async function adminRevokeCode(env, user, id) {
+  const denied = requireAdmin(user);
+  if (denied) return denied;
+  await env.DB.prepare("UPDATE license_codes SET revoked = 1 WHERE id = ?").bind(id).run();
+  return json({ ok: true });
+}
+
+/* ---------- Stripe（キーが設定されている場合のみ有効） ---------- */
+async function stripeApi(env, method, path, params) {
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(20000)
+    : undefined;
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    method,
+    headers: {
+      "Authorization": "Basic " + btoa(String(env.STRIPE_SECRET_KEY || "") + ":"),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params ? new URLSearchParams(params).toString() : undefined,
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error((data.error && data.error.message) || `Stripe API error (${res.status})`);
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
+/* サブスクリプションオブジェクトから現在の期間終了を取得する（API バージョン差異を吸収） */
+function stripePeriodEnd(sub) {
+  if (!sub) return 0;
+  if (sub.current_period_end) return sub.current_period_end;
+  const items = sub.items && sub.items.data;
+  if (items && items[0] && items[0].current_period_end) return items[0].current_period_end;
+  return 0;
+}
+
+async function billingCheckout(request, env, user) {
+  if (!env.STRIPE_SECRET_KEY || !env.STRIPE_PRICE_ID) {
+    return json({ ok: false, code: "stripe_not_configured", error: "決済は現在準備中です" });
+  }
+  const origin = new URL(request.url).origin;
+  try {
+    const params = {
+      "mode": "subscription",
+      "line_items[0][price]": String(env.STRIPE_PRICE_ID),
+      "line_items[0][quantity]": "1",
+      "client_reference_id": String(user.id),
+      "success_url": `${origin}/?billing=success`,
+      "cancel_url": `${origin}/?billing=cancel`,
+    };
+    if (user.stripe_customer_id) params.customer = String(user.stripe_customer_id);
+    else params.customer_email = user.email;
+    const session = await stripeApi(env, "POST", "/checkout/sessions", params);
+    return json({ ok: true, url: session.url });
+  } catch (e) {
+    return json({ ok: false, error: e.message || String(e) });
+  }
+}
+
+async function hmacSha256Hex(key, msg) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function timingSafeEqualStr(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/* Stripe Webhook（認証なし。署名検証で正当性を確認する）。
+   サブスクリプションが終了・解約されても、既に書き出した外部データには触れない。
+   ここで変わるのはアプリ内の権利状態だけ。 */
+async function billingWebhook(request, env) {
+  const secret = env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) return err("webhook is not configured", 400);
+  const payload = await request.text();
+  const sigHeader = request.headers.get("Stripe-Signature") || "";
+  const parts = {};
+  for (const kv of sigHeader.split(",")) {
+    const idx = kv.indexOf("=");
+    if (idx > 0) parts[kv.slice(0, idx).trim()] = kv.slice(idx + 1).trim();
+  }
+  const t = parts.t;
+  const v1 = parts.v1;
+  if (!t || !v1) return err("invalid signature", 400);
+  if (Math.abs(nowSec() - parseInt(t)) > 300) return err("signature timestamp out of tolerance", 400);
+  const expected = await hmacSha256Hex(secret, `${t}.${payload}`);
+  if (!timingSafeEqualStr(expected, v1)) return err("invalid signature", 400);
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch (_) {
+    return err("invalid payload", 400);
+  }
+  try {
+    if (event.type === "checkout.session.completed") {
+      const s = event.data.object || {};
+      const userId = parseInt(s.client_reference_id);
+      if (userId && s.subscription) {
+        const sub = await stripeApi(env, "GET", `/subscriptions/${encodeURIComponent(s.subscription)}`);
+        await env.DB.prepare(
+          "UPDATE users SET stripe_customer_id = ?, stripe_subscription_id = ?, sub_period_end = ?, sub_source = 'stripe' WHERE id = ?"
+        ).bind(String(s.customer || ""), String(s.subscription), stripePeriodEnd(sub), userId).run();
+      }
+    } else if (event.type === "customer.subscription.updated") {
+      const sub = event.data.object || {};
+      if (sub.id) {
+        await env.DB.prepare("UPDATE users SET sub_period_end = ? WHERE stripe_subscription_id = ?")
+          .bind(stripePeriodEnd(sub), String(sub.id)).run();
+      }
+    } else if (event.type === "customer.subscription.deleted") {
+      const sub = event.data.object || {};
+      if (sub.id) {
+        /* 期間終了までは使えるよう sub_period_end はそのまま。紐付けだけ解除する */
+        await env.DB.prepare("UPDATE users SET stripe_subscription_id = '' WHERE stripe_subscription_id = ?")
+          .bind(String(sub.id)).run();
+      }
+    }
+  } catch (e) {
+    console.error("[stripe-webhook] handling failed:", e && e.message ? e.message : e);
+    return err("webhook handling failed", 500);
+  }
+  return json({ received: true });
 }
 
 /* ---------- Notion API ---------- */
@@ -747,6 +1050,8 @@ async function syncToNotion(env, user, item, action, origin) {
   try {
     if (!user || !item) return;
     if (!user.notion_enabled) return;
+    /* Notion 同期の実行はエクスポートプラン（有料）が必要。期限切れなら静かに止める */
+    if (!hasExportAccess(user)) return;
     const token = String(user.notion_token || "").trim();
     const dbId = String(user.notion_db_id || "").trim();
     if (!token || !dbId) return;
@@ -923,6 +1228,9 @@ export default {
         return err("Not Found", 404);
       }
 
+      /* Stripe Webhook は認証なし（署名検証で正当性を確認する） */
+      if (path === "/api/billing/webhook" && request.method === "POST") return billingWebhook(request, env);
+
       if (path.startsWith("/api/")) {
         const user = await currentUser(request, env);
         if (!user) return json({ error: "unauthorized" }, 401);
@@ -930,14 +1238,36 @@ export default {
         if (path === "/api/auth/me" && request.method === "GET") return json({ id: user.id, email: user.email });
         if (path === "/api/settings" && request.method === "GET") return getUserSettings(env, user);
         if (path === "/api/settings" && request.method === "PUT") return updateUserSettings(request, env, user);
+        if (path === "/api/license/redeem" && request.method === "POST") return redeemLicense(request, env, user);
+        if (path === "/api/billing/checkout" && request.method === "POST") return billingCheckout(request, env, user);
+        /* 管理 API（ハンドラ側でも管理者チェックを行う） */
+        if (path === "/api/admin/users" && request.method === "GET") return adminListUsers(env, user);
+        if (path === "/api/admin/codes" && request.method === "GET") return adminListCodes(env, user);
+        if (path === "/api/admin/codes" && request.method === "POST") return adminCreateCodes(request, env, user);
+        let am;
+        if ((am = path.match(/^\/api\/admin\/users\/(\d+)\/grant$/)) && request.method === "POST") return adminGrant(request, env, user, parseInt(am[1]));
+        if ((am = path.match(/^\/api\/admin\/users\/(\d+)\/revoke-sub$/)) && request.method === "POST") return adminRevokeSub(env, user, parseInt(am[1]));
+        if ((am = path.match(/^\/api\/admin\/codes\/(\d+)\/revoke$/)) && request.method === "POST") return adminRevokeCode(env, user, parseInt(am[1]));
         if (path === "/api/notion/test" && request.method === "POST") return testNotion(request, env, user);
-        if (path === "/api/notion/sync-all" && request.method === "POST") return syncAllToNotion(request, env, user);
+        if (path === "/api/notion/sync-all" && request.method === "POST") {
+          if (!hasExportAccess(user)) return subRequiredResponse();
+          return syncAllToNotion(request, env, user);
+        }
         if (path === "/api/items/reorder" && request.method === "PUT") return reorderItems(request, env, user);
         if (path === "/api/labels" && request.method === "GET") return listLabels(env, user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
-        if (path === "/api/export.csv" && request.method === "GET") return exportCsv(request, env, user);
-        if (path === "/api/export.json" && request.method === "GET") return exportJson(request, env, user);
-        if (path === "/api/sheets/export" && request.method === "POST") return exportToSheets(request, env, user);
+        if (path === "/api/export.csv" && request.method === "GET") {
+          if (!hasExportAccess(user)) return subRequiredResponse();
+          return exportCsv(request, env, user);
+        }
+        if (path === "/api/export.json" && request.method === "GET") {
+          if (!hasExportAccess(user)) return subRequiredResponse();
+          return exportJson(request, env, user);
+        }
+        if (path === "/api/sheets/export" && request.method === "POST") {
+          if (!hasExportAccess(user)) return subRequiredResponse();
+          return exportToSheets(request, env, user);
+        }
         if (path === "/api/items" && request.method === "POST") return createItem(request, env, user, ctx);
         if (path === "/api/memos" && request.method === "GET") return listAllMemos(env, user);
         if (path === "/api/lookup" && request.method === "GET") return handleLookup(request);
@@ -959,7 +1289,12 @@ export default {
         return err("Not Found", 404);
       }
 
-      return env.ASSETS.fetch(request);
+      const assetRes = await env.ASSETS.fetch(request);
+      /* SPA フォールバック: /admin など拡張子のないパスは index.html を返す */
+      if (assetRes.status === 404 && request.method === "GET" && !path.includes(".")) {
+        return env.ASSETS.fetch(new Request(new URL("/index.html", request.url).toString(), { method: "GET" }));
+      }
+      return assetRes;
     } catch (e) {
       return json({ error: "サーバーエラー: " + (e && e.message ? e.message : String(e)) }, 500);
     }

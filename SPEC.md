@@ -97,7 +97,6 @@
 
 ## 対象外
 - 貸出管理（塚本様の指示なし、プレビューにもなし）
-- 決済・有料機能
 
 ## 完了条件
 - ローカルで動作確認（登録→本棚表示→引き出しアニメーション→メモ→検索→CSVエクスポートの一連。CSVはExcelで文字化けしないことを含む）
@@ -105,42 +104,49 @@
 - Cloudflareへデプロイし、公開URLを報告する
 - Cloudflareの認証等でブロックされた場合は、できるところまで進めて報告する
 
-## 有料化計画（外部エクスポート / アクティベーションコード方式）— 2026-11-25 計画策定・未実装
+## 有料化仕様（外部エクスポート / サブスクリプション型）— 2026-11-25 実装済み
 
-方針: 基本機能はすべて無料。**外部へのエクスポートだけを有料機能**とし、買い切りのアクティベーションコードで解放する。実装は本計画に沿って行う（塚本様の開始指示があるまで実装しない）。
+方針: 基本機能はすべて無料。**外部へのエクスポートだけを有料機能**とし、期間制のサブスクリプションで解放する。権利の取得方法は Stripe 決済・アクティベーションコード・管理者付与の3通り。
 
-### 有料対象（export_unlocked が必要）
+### 有料対象（権利が必要）
 - CSV ダウンロード（GET /api/export.csv）
 - Excel（.xlsx）ダウンロード（GET /api/export.json 経由の生成を含む）
 - Google スプレッドシート書き出し（POST /api/sheets/export）
 - Notion 連携の実行（自動同期 syncToNotion、一括同期 POST /api/notion/sync-all、設定での notion_enabled の有効化）
-- 例外: Notion の接続テスト（POST /api/notion/test）は無料で可とする（購入前に接続可否を確認できるようにするため）
+- 例外: Notion の接続テスト（POST /api/notion/test）は無料（購入前に接続可否を確認できるようにするため）
+- 未加入時は 403 `{ error: "この機能はエクスポートプラン（有料）が必要です", code: "subscription_required" }` を返す
 
 ### 無料のまま
-アイテムの登録・編集・削除、棚/リスト表示、検索・絞り込み、バーコード/ISBN/品番検索、書誌情報の自動取得、画像3面登録、台形補正、メモ、並び替え、CSV 以外の全機能。
+アイテムの登録・編集・削除、棚/リスト表示、検索・絞り込み、バーコード/ISBN/品番検索、書誌情報の自動取得、画像3面登録、台形補正、メモ、並び替えなど、上記以外の全機能。
 
-### アクティベーションコード設計
-- 形式: `MBSH-XXXXXX-XXXXXX-XXXXXX`（推測困難なランダム英数字。正規化はハイフン除去＋大文字化）
-- 保存: 平文は保存しない。SHA-256 ハッシュのみを D1 に保存し、平文は発行時に一度だけ表示する
-- テーブル `license_codes`: id / code_hash（UNIQUE）/ feature（当面 'export' 固定）/ note（発行先メモ）/ created_at / redeemed_by（users.id、NULL=未使用）/ redeemed_at / revoked（0/1）
-- users に `export_unlocked INTEGER NOT NULL DEFAULT 0` を追加
-- 発行: 管理用スクリプト `scripts/gen-license-codes.mjs --count N --note "..."` が平文コードを標準出力し、ハッシュを本番 D1 へ INSERT する
-- 償還: `POST /api/license/redeem { code }` → ハッシュ照合し、未使用・未失効なら redeemed_by に自分を設定し users.export_unlocked=1 にする。1コード=1アカウント。エラー文は「コードが無効です」に統一し詳細を漏らさない
-- 設定取得（GET /api/settings）に export_unlocked を含める
-- ゲート: 上記の有料対象エンドポイントと自動同期の実行条件に export_unlocked を追加。未解放時は 403 `{ error: "有料機能です", code: "license_required" }`
-- UI: 設定画面に「エクスポート機能の有効化」カード（コード入力＋有効化ボタン＋解放状態の表示）。未解放時は各エクスポートボタンと Notion カードに「有料」バッジと案内を表示する
-- 塚本様ご自身のアカウントは管理側で export_unlocked=1 に設定しておく
+### 権利モデル（サブスクリプション）
+- users の列: `sub_period_end`（権利終了時刻・unix秒）/ `sub_source`（stripe | code | admin）/ `stripe_customer_id` / `stripe_subscription_id`
+- 権利あり = `sub_period_end > 現在時刻`。管理者メール `rb18vcarb@gmail.com`（定数 ADMIN_EMAIL）は状態によらず常時権利あり
+- **無期限**: `sub_period_end` にセンチネル値 `4102444800`（2100-01-01 UTC）を入れて表す。画面表示では 2100年以降の日付を出さず「無期限」と表示する
+- **期限切れの挙動**: 書き出し・同期が止まるだけ。既に書き出された外部データ（ダウンロード済みファイル、Google スプレッドシート、Notion のページ）には一切触れない（削除・変更しない）
 
-### 未決事項（実装前に決める）
-- 価格（買い切り想定。金額未定）
-- 販売チャネル（BOOTH でコードを販売する想定だが未確定）
-- コードの有効期限の有無、返金・再発行ポリシー
-- 償還の試行回数制限（ブルートフォース対策を入れるか）
+### アクティベーションコード
+- 形式: `MBSH-XXXXXX-XXXXXX-XXXXXX`（紛らわしい文字 0/O/1/I/L を除いた英数字から crypto.getRandomValues で生成）
+- 保存: 平文は保存しない。SHA-256 ハッシュのみを D1 に保存し、平文は発行 API の応答でのみ一度だけ返す
+- テーブル `license_codes`: id / code_hash（UNIQUE）/ code_hint（末尾4文字）/ duration_days（**NULL は無期限**）/ note / created_at / created_by / redeemed_by（NULL=未使用）/ redeemed_at / revoked
+- 償還: `POST /api/license/redeem { code }`（要ログイン）。入力を正規化（大文字化・ハイフン/空白除去）してハッシュ照合。未使用・未失効なら redeemed_by / redeemed_at を記録し、`sub_period_end = max(now, 現在の終了時刻) + duration_days 日`（無期限コードはセンチネル値）、`sub_source='code'` にする。失敗は理由を漏らさず一律 200 で `{ ok: false, error: "コードが無効です" }`、成功時は `{ ok: true, sub_period_end }`
+- 発行は管理画面（/admin）から行う（個数・期間プリセット 30/90/365/無期限＋日数指定・メモ）
 
-### 実装手順
-1. D1 マイグレーション（license_codes 作成、users.export_unlocked 追加）
-2. 発行スクリプト scripts/gen-license-codes.mjs
-3. POST /api/license/redeem と GET /api/settings への export_unlocked 追加
-4. 有料対象エンドポイント＋自動同期へのゲート適用
-5. 設定画面の有効化カードと「有料」バッジ表示
-6. 検証: 未解放で 403 / 正規コードで解放 / 使用済みコードの再利用不可 / 失効コード不可
+### 管理画面（/admin）
+- 管理者メールでログインしている場合のみ利用可（API はすべて user.email === ADMIN_EMAIL でなければ 403）。設定画面の下部に管理者だけ「管理画面を開く（/admin）」リンクが表示される
+- `GET /api/admin/users`: 全ユーザーの id / email / sub_period_end / sub_source / アイテム数
+- `POST /api/admin/users/:id/grant { days }` または `{ unlimited: true }`: 期間延長（sub_source='admin'）。画面には +30日 / +365日 / 無期限 のボタンを置く
+- `POST /api/admin/users/:id/revoke-sub`: sub_period_end を 0 にして停止
+- `POST /api/admin/codes { count, duration_days | unlimited, note }`: コード発行（平文は応答でのみ返す）
+- `GET /api/admin/codes`: コード一覧（平文は返さない）
+- `POST /api/admin/codes/:id/revoke`: コードを失効
+
+### Stripe 決済（キー設定後に有効）
+- 環境変数 `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` を設定した場合のみ有効。未設定時は `POST /api/billing/checkout` が `{ ok: false, code: "stripe_not_configured", error: "決済は現在準備中です" }` を返す（コードでの有効化は引き続き可能）
+- `POST /api/billing/checkout`（要ログイン）: Stripe Checkout（mode=subscription）のセッションを作成し URL を返す。client_reference_id にユーザー ID、success_url / cancel_url は `/?billing=success` / `/?billing=cancel`
+- `POST /api/billing/webhook`（認証なし）: Stripe-Signature を HMAC-SHA256 で検証（5分の tolerance）。`checkout.session.completed` で customer / subscription を保存し期間終了を設定（sub_source='stripe'）、`customer.subscription.updated` で期間終了を更新、`customer.subscription.deleted` では sub_period_end をそのまま（期間終了までは使える）にして stripe_subscription_id のみクリアする
+- GET /api/settings の応答には `subscription: { active, period_end, unlimited, source, is_admin }` を含む
+
+### フロントエンド
+- 設定画面に「エクスポートプラン」カード: 状態表示（管理者 / 有効（期限または無期限・取得方法）/ 未加入）、コード入力＋有効化ボタン、「サブスクリプションに登録する」ボタン（checkout の URL へ遷移。未設定時は準備中メッセージ）、期限切れ時の注記
+- 未加入時はエクスポートカードと Notion カードに「有料プランが必要」の案内を表示する

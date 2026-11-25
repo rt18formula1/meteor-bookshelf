@@ -19,9 +19,121 @@ async function fetchAllItems() {
   return all;
 }
 
+/* サブスクリプション（エクスポートプラン）の表示用ヘルパー */
+const SUB_SOURCE_LABEL = { stripe: "Stripe", code: "コード", admin: "管理者付与" };
+const SUB_UNLIMITED_END = 4102444800; // 2100-01-01 UTC。これ以上は「無期限」
+function fmtSubDate(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+}
+function subStatusText(sub) {
+  if (!sub) return "読み込み中…";
+  if (sub.is_admin) return "管理者アカウント（常時有効）";
+  if (!sub.active) return "未加入";
+  const src = SUB_SOURCE_LABEL[sub.source] || sub.source || "";
+  if (sub.unlimited || (sub.period_end || 0) >= SUB_UNLIMITED_END) {
+    return `有効（無期限${src ? `・取得方法: ${src}` : ""}）`;
+  }
+  return `有効（${fmtSubDate(sub.period_end)} まで${src ? `・取得方法: ${src}` : ""}）`;
+}
+
+/* エクスポートプラン（サブスクリプション）カード。
+   コードの有効化と Stripe 決済への導線。状態は親が /api/settings から渡す。 */
+function PlanCard({ subscription, onChanged }) {
+  const { toast } = useApp();
+  const [code, setCode] = useState("");
+  const [redeeming, setRedeeming] = useState(false);
+  const [redeemResult, setRedeemResult] = useState(null); // { ok, message }
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [checkoutMsg, setCheckoutMsg] = useState("");
+
+  const redeem = async () => {
+    if (!code.trim()) return;
+    setRedeeming(true);
+    setRedeemResult(null);
+    try {
+      const r = await apiJson("/api/license/redeem", "POST", { code: code.trim() });
+      if (r.ok) {
+        setRedeemResult({ ok: true, message: "コードを有効化しました" });
+        setCode("");
+        toast("エクスポートプランを有効化しました");
+        if (onChanged) onChanged();
+      } else {
+        setRedeemResult({ ok: false, message: r.error || "コードが無効です" });
+      }
+    } catch (e) {
+      setRedeemResult({ ok: false, message: e.message });
+    } finally {
+      setRedeeming(false);
+    }
+  };
+
+  const checkout = async () => {
+    setCheckingOut(true);
+    setCheckoutMsg("");
+    try {
+      const r = await apiJson("/api/billing/checkout", "POST", {});
+      if (r.ok && r.url) {
+        window.location.href = r.url;
+        return;
+      }
+      if (r.code === "stripe_not_configured") {
+        setCheckoutMsg("決済は準備中です。コードをお持ちの方は上から有効化できます");
+      } else {
+        setCheckoutMsg(r.error || "決済を開始できませんでした");
+      }
+    } catch (e) {
+      setCheckoutMsg(e.message);
+    } finally {
+      setCheckingOut(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h3>エクスポートプラン</h3>
+      <p className="small">
+        状態: <strong>{subStatusText(subscription)}</strong>
+      </p>
+      <p className="muted small">
+        外部へのエクスポート（CSV / Excel のダウンロード、Google スプレッドシート書き出し、Notion 連携の実行）は有料プランでご利用いただけます。それ以外の機能はすべて無料です。
+        期限が切れると書き出し・Notion 同期は止まりますが、書き出し済みのファイルや Notion のページはそのまま残ります。
+      </p>
+      <label>
+        アクティベーションコード
+        <input
+          type="text"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="MBSH-XXXXXX-XXXXXX-XXXXXX"
+          autoComplete="off"
+        />
+      </label>
+      <div className="row-gap wrap">
+        <button className="btn-primary" onClick={redeem} disabled={redeeming || !code.trim()}>
+          {redeeming ? "確認中…" : "有効化する"}
+        </button>
+        <button className="btn-secondary" onClick={checkout} disabled={checkingOut}>
+          {checkingOut ? "決済画面へ移動中…" : "サブスクリプションに登録する"}
+        </button>
+      </div>
+      {redeemResult && (
+        <p className="small" style={{ marginTop: 10, color: redeemResult.ok ? "#2e6b2e" : "#b03030" }}>
+          {redeemResult.message}
+        </p>
+      )}
+      {checkoutMsg && (
+        <p className="small" style={{ marginTop: 10, color: "#b03030" }}>
+          {checkoutMsg}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /* Notion 連携設定カード。
    トークンはサーバーに保存されるだけで、画面には再表示されない（設定済みかどうかだけ分かる）。 */
-function NotionCard() {
+function NotionCard({ subActive }) {
   const { toast } = useApp();
   const [loaded, setLoaded] = useState(false);
   const [hasToken, setHasToken] = useState(false);
@@ -169,6 +281,11 @@ function NotionCard() {
         />
         Notion連携を有効にする
       </label>
+      {subActive === false && (
+        <p className="small" style={{ color: "#b03030", margin: "4px 0 8px" }}>
+          Notion 同期の実行にはエクスポートプラン（有料）が必要です。接続テストは無料でご利用いただけます。
+        </p>
+      )}
       <div className="row-gap wrap">
         <button className="btn-primary" onClick={save} disabled={!loaded || saving}>
           {saving ? "保存中…" : "保存"}
@@ -257,16 +374,19 @@ export default function SettingsView() {
   const [sheetsBusy, setSheetsBusy] = useState(false);
   const [sheetsResult, setSheetsResult] = useState(null); // { ok, message, url }
   const [sheetsUrl, setSheetsUrl] = useState("");
+  const [subscription, setSubscription] = useState(null);
+
+  const reloadSettings = async () => {
+    try {
+      const s = await api("/api/settings");
+      if (s.sheets_url) setSheetsUrl(s.sheets_url);
+      setSubscription(s.subscription || null);
+    } catch (_) {}
+  };
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const s = await api("/api/settings");
-        if (!cancelled && s.sheets_url) setSheetsUrl(s.sheets_url);
-      } catch (_) {}
-    })();
-    return () => { cancelled = true; };
+    reloadSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* Google 承認ポップアップで Sheets 用のアクセストークンを取得し、
@@ -334,10 +454,17 @@ export default function SettingsView() {
           ログアウト
         </button>
       </div>
-      <NotionCard />
+      <PlanCard subscription={subscription} onChanged={reloadSettings} />
+      <NotionCard subActive={subscription ? subscription.active : undefined} />
       <div className="card">
         <h3>データのエクスポート</h3>
         <p className="muted small">自分の棚の全アイテムを、CSV / Excel ファイルでダウンロードしたり、Google スプレッドシートへ書き出したりできます。</p>
+        {subscription && !subscription.active && (
+          <p className="small" style={{ color: "#b03030" }}>
+            <span className="badge" style={{ marginRight: 6 }}>有料プランが必要</span>
+            エクスポート機能のご利用にはエクスポートプランへの加入が必要です。
+          </p>
+        )}
         <div className="row-gap wrap">
           <button className="btn-secondary" onClick={exportAll}>
             <IconDownload size={16} /> CSVでダウンロード
@@ -360,6 +487,15 @@ export default function SettingsView() {
           </p>
         )}
       </div>
+      {user && String(user.email || "").toLowerCase() === "rb18vcarb@gmail.com" && (
+        <div className="card">
+          <h3>管理</h3>
+          <p className="muted small">ユーザーとアクティベーションコードの管理画面です（管理者アカウントでのみ表示されます）。</p>
+          <a className="btn-secondary" href="/admin" style={{ display: "inline-block", textDecoration: "none" }}>
+            管理画面を開く（/admin）
+          </a>
+        </div>
+      )}
       <div className="card">
         <h3>このアプリについて</h3>
         <p className="muted small">私の本棚 — Bookshelf。書籍・CD・DVD等を木の本棚のメタファーで管理する小規模公開アプリです。書誌情報の取得には OpenBD / Google Books / NDLサーチ / MusicBrainz を利用しています。</p>
