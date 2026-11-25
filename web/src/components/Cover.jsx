@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { coverSrc, spineColor, spineTextColor } from "../utils.js";
+import AuthedImage from "./AuthedImage.jsx";
 
 /* 生成表紙: 背表紙色ベースのグラデーション＋額縁＋タイトル/著者 */
 export function GenCover({ item, className = "" }) {
@@ -26,5 +27,5 @@ export default function Cover({ item, className = "" }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
   if (!src || failed) return <GenCover item={item} className={className} />;
-  return <img className={className} src={src} alt={item.title} loading="lazy" onError={() => setFailed(true)} />;
+  return <AuthedImage className={className} src={src} alt={item.title} loading="lazy" onError={() => setFailed(true)} />;
 }

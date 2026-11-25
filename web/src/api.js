@@ -31,6 +31,25 @@ export function apiJson(path, method, body) {
   });
 }
 
+/* 認証付きで画像を取得し、object URL を返す（<img> では Authorization を付けられないため）。
+   同じキーは再取得しないようキャッシュする */
+const imageUrlCache = new Map();
+export function apiImageObjectUrl(key) {
+  if (!key) return Promise.resolve("");
+  if (!imageUrlCache.has(key)) {
+    const p = (async () => {
+      const headers = await authHeaders();
+      const res = await fetch(`/api/images/${encodeURIComponent(key)}`, { headers });
+      if (!res.ok) throw new Error(`画像の取得に失敗しました (${res.status})`);
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    })();
+    p.catch(() => imageUrlCache.delete(key));
+    imageUrlCache.set(key, p);
+  }
+  return imageUrlCache.get(key);
+}
+
 /* CSV をダウンロードする（絞り込みパラメータ対応: type, q, unread, withMemo） */
 export async function downloadCsv(params = {}) {
   const clean = {};

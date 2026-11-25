@@ -125,6 +125,7 @@ export default function LoginScreen() {
               </>
             )}
           </p>
+          <p className="app-credit">© Meteor Creator Studio</p>
         </div>
       </div>
     </div>

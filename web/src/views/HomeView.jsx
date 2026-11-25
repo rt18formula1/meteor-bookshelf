@@ -1,22 +1,42 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api.js";
+import { api, apiJson } from "../api.js";
 import { useApp } from "../store.jsx";
-import { TYPE_FILTERS } from "../utils.js";
+import { TYPE_FILTERS, coverSrc, spineColor } from "../utils.js";
 import Shelf, { EmptyShelf } from "../components/Shelf.jsx";
 import PulloutPanel from "../components/PulloutPanel.jsx";
 import ListRow from "../components/ListRow.jsx";
+import AuthedImage from "../components/AuthedImage.jsx";
 import { IconMemo, IconScan } from "../components/Icons.jsx";
 
 const PAGE = 28;
 
+const SORT_OPTIONS = [
+  { value: "manual", label: "手動の並び順" },
+  { value: "title", label: "タイトル順" },
+  { value: "creator", label: "作者順" },
+  { value: "category", label: "カテゴリー順" },
+  { value: "new", label: "新しい順" },
+  { value: "old", label: "古い順" },
+  { value: "type", label: "種別順" },
+];
+
 export default function HomeView({ viewMode, setViewMode }) {
-  const { toast, itemsVersion, setView, setTotalCount } = useApp();
+  const { toast, itemsVersion, setView, setTotalCount, bumpItems } = useApp();
   const [homeType, setHomeType] = useState("");
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [counts, setCounts] = useState({});
   const [hasMore, setHasMore] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
+  const [sort, setSort] = useState("manual");
+  const [category, setCategory] = useState("");
+  const [categories, setCategories] = useState([]);
+  /* 編集モード（並べ替え） */
+  const [editing, setEditing] = useState(false);
+  const [editItems, setEditItems] = useState([]);
+  const [editBusy, setEditBusy] = useState(false);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [overIdx, setOverIdx] = useState(null);
   const loadingRef = useRef(false);
   const itemsRef = useRef([]);
   itemsRef.current = items;
@@ -26,7 +46,8 @@ export default function HomeView({ viewMode, setViewMode }) {
     loadingRef.current = true;
     try {
       const offset = reset ? 0 : itemsRef.current.length;
-      const qs = new URLSearchParams({ type: homeType, limit: PAGE, offset });
+      const qs = new URLSearchParams({ type: homeType, limit: PAGE, offset, sort });
+      if (category) qs.set("category", category);
       const data = await api(`/api/items?${qs}`);
       const next = reset ? data.items : itemsRef.current.concat(data.items);
       setItems(next);
@@ -38,16 +59,16 @@ export default function HomeView({ viewMode, setViewMode }) {
     } finally {
       loadingRef.current = false;
     }
-  }, [homeType, toast, setTotalCount]);
+  }, [homeType, sort, category, toast, setTotalCount]);
 
-  /* 初回・フィルター変更・アイテム変更時はリセット読み込み */
+  /* 初回・フィルター/並び順変更・アイテム変更時はリセット読み込み */
   useEffect(() => {
     setSelectedId(null);
     load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [homeType, itemsVersion]);
+  }, [homeType, sort, category, itemsVersion]);
 
-  /* 種別ごとの件数（ピル表示用） */
+  /* 種別ごとの件数（ピル表示用）＋カテゴリー候補 */
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -63,6 +84,10 @@ export default function HomeView({ viewMode, setViewMode }) {
       } catch {
         /* 件数が取れない場合はピルに数字を出さない */
       }
+      try {
+        const labels = await api("/api/labels");
+        if (!cancelled) setCategories(labels.categories || []);
+      } catch { /* 候補が取れない場合は絞り込みを出さない */ }
     })();
     return () => { cancelled = true; };
   }, [itemsVersion]);
@@ -71,9 +96,94 @@ export default function HomeView({ viewMode, setViewMode }) {
     if (hasMore) load(false);
   }, [hasMore, load]);
 
+  /* ---- 編集モード（並べ替え） ---- */
+  const startEdit = async () => {
+    try {
+      const data = await api(`/api/items?sort=manual&limit=1000&offset=0`);
+      setEditItems(data.items);
+      setEditing(true);
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+  const moveEdit = (from, to) => {
+    if (to < 0) return;
+    setEditItems((prev) => {
+      if (from === to || to >= prev.length) return prev;
+      const next = [...prev];
+      const [it] = next.splice(from, 1);
+      next.splice(to, 0, it);
+      return next;
+    });
+  };
+  const saveEdit = async () => {
+    if (editBusy) return;
+    setEditBusy(true);
+    try {
+      await apiJson("/api/items/reorder", "PUT", { ids: editItems.map((i) => i.id) });
+      setEditing(false);
+      toast("並び順を保存しました");
+      bumpItems();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setEditBusy(false);
+    }
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setEditItems([]);
+    setDragIdx(null);
+    setOverIdx(null);
+  };
+
   const selectedItem = items.find((x) => x.id === selectedId) || null;
-  const isEmpty = total === 0 && homeType === "";
+  const isEmpty = total === 0 && homeType === "" && category === "";
   const grandTotal = counts[""] != null ? counts[""] : total;
+
+  if (editing) {
+    return (
+      <section className="view view-home">
+        <div className="edit-banner">
+          <strong>並べ替え編集中</strong>
+          <span>ドラッグ、または ↑↓ ボタンで順序を変更し、「完了」で保存します（全{editItems.length}件・フィルターなし）。</span>
+        </div>
+        <div className="reorder-list">
+          {editItems.map((item, idx) => (
+            <div
+              key={item.id}
+              className={`reorder-row${dragIdx === idx ? " dragging" : ""}${overIdx === idx && dragIdx !== idx ? " dragover" : ""}`}
+              draggable
+              onDragStart={(e) => { setDragIdx(idx); e.dataTransfer.effectAllowed = "move"; }}
+              onDragOver={(e) => { e.preventDefault(); setOverIdx(idx); }}
+              onDrop={(e) => { e.preventDefault(); if (dragIdx != null) moveEdit(dragIdx, idx); setDragIdx(null); setOverIdx(null); }}
+              onDragEnd={() => { setDragIdx(null); setOverIdx(null); }}
+            >
+              <span className="reorder-handle" title="ドラッグで並べ替え">⠿</span>
+              {coverSrc(item) ? (
+                <AuthedImage src={coverSrc(item)} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+              ) : (
+                <span className="reorder-thumb-gen" style={{ background: spineColor(item) }}>{(item.title || "").slice(0, 1)}</span>
+              )}
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span className="reorder-title">{item.title}</span>
+                <span className="reorder-sub">{item.creator || ""}{item.category ? ` ／ ${item.category}` : ""}</span>
+              </span>
+              <span className="reorder-move">
+                <button type="button" disabled={idx === 0} onClick={() => moveEdit(idx, idx - 1)} aria-label="上へ">↑</button>
+                <button type="button" disabled={idx === editItems.length - 1} onClick={() => moveEdit(idx, idx + 1)} aria-label="下へ">↓</button>
+              </span>
+            </div>
+          ))}
+          {editItems.length === 0 && <p className="empty-text">まだ何も登録されていません。</p>}
+        </div>
+        <div className="row-gap" style={{ marginTop: 14 }}>
+          <button className="btn-primary" onClick={saveEdit} disabled={editBusy}>{editBusy ? "保存中…" : "完了"}</button>
+          <button className="btn-secondary" onClick={cancelEdit} disabled={editBusy}>キャンセル</button>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="view view-home">
@@ -99,7 +209,7 @@ export default function HomeView({ viewMode, setViewMode }) {
           isEmpty ? (
             <EmptyShelf onAdd={() => setView("scan")} />
           ) : items.length === 0 ? (
-            <p className="empty-text empty-onwood">この種別のアイテムはまだ登録されていません。</p>
+            <p className="empty-text empty-onwood">この条件のアイテムはまだ登録されていません。</p>
           ) : (
             <Shelf
               items={items}
@@ -130,6 +240,30 @@ export default function HomeView({ viewMode, setViewMode }) {
           <button className={`toggle-btn${viewMode === "shelf" ? " active" : ""}`} onClick={() => setViewMode("shelf")}>本棚</button>
           <button className={`toggle-btn${viewMode === "list" ? " active" : ""}`} onClick={() => setViewMode("list")}>リスト</button>
         </div>
+      </div>
+
+      {/* 並び順・カテゴリー絞り込み・編集（並べ替え） */}
+      <div className="controls-row">
+        <select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="並び順">
+          {SORT_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <select value={category} onChange={(e) => setCategory(e.target.value)} aria-label="カテゴリーで絞り込み">
+          <option value="">カテゴリー: すべて</option>
+          {categories.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+        <span className="controls-spacer" />
+        <button
+          className="btn-secondary btn-small"
+          onClick={startEdit}
+          disabled={sort !== "manual"}
+          title={sort !== "manual" ? "並べ替えは「手動の並び順」のときだけ使えます" : "並べ替え編集を開く"}
+        >
+          編集（並べ替え）
+        </button>
       </div>
 
       {viewMode === "shelf" ? (

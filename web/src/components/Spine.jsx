@@ -1,9 +1,10 @@
 import React, { useState } from "react";
-import { coverSrc, progressPct, spineColor, spineSize, spineTextColor } from "../utils.js";
+import { progressPct, spineColor, spineSize, spineSrc, spineTextColor } from "../utils.js";
+import AuthedImage from "./AuthedImage.jsx";
 
 export default function Spine({ item, selected, onSelect }) {
   const { width, height } = spineSize(item);
-  const src = coverSrc(item);
+  const src = spineSrc(item);
   const [imgFailed, setImgFailed] = useState(false);
   const pct = progressPct(item);
   const color = spineColor(item);
@@ -19,7 +20,7 @@ export default function Spine({ item, selected, onSelect }) {
       title={item.title}
     >
       {showImg ? (
-        <img className="spine-cover" src={src} alt="" loading="lazy" onError={() => setImgFailed(true)} />
+        <AuthedImage className="spine-cover" src={src} alt="" loading="lazy" onError={() => setImgFailed(true)} />
       ) : (
         <>
           <span className="spine-band spine-band-top" />

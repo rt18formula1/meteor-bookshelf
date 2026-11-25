@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { STATUS_LABEL, TYPE_BADGE, coverSrc, spineColor } from "../utils.js";
 import { useApp } from "../store.jsx";
+import AuthedImage from "./AuthedImage.jsx";
 
 export default function ListRow({ item }) {
   const { openDetail } = useApp();
@@ -10,7 +11,7 @@ export default function ListRow({ item }) {
   return (
     <button className="list-row" onClick={() => openDetail(item.id)}>
       {src && !failed ? (
-        <img className="list-thumb" src={src} alt="" loading="lazy" onError={() => setFailed(true)} />
+        <AuthedImage className="list-thumb" src={src} alt="" loading="lazy" onError={() => setFailed(true)} />
       ) : (
         <span className="list-thumb-gen" style={{ background: spineColor(item) }}>
           {(item.title || "").slice(0, 1)}
@@ -19,6 +20,9 @@ export default function ListRow({ item }) {
       <span className="list-main">
         <span className="list-title">{item.title}</span>
         <span className="list-sub">{item.creator || ""}</span>
+        {(item.type === "cd" || item.type === "dvd") && item.catno && (
+          <span className="list-catno">品番 {item.catno}</span>
+        )}
       </span>
       <span className="list-meta">
         <span className="badge">{TYPE_BADGE[item.type] || "ITEM"}</span>

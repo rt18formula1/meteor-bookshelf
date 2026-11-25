@@ -1,5 +1,5 @@
 // Bookshelf App — Cloudflare Worker (API + static assets)
-// Bindings: DB (D1), IMAGES (KV), ASSETS (static)
+// Bindings: DB (D1), IMAGES_R2 (R2, 画像の本命), IMAGES (KV, 旧キーの読取互換), ASSETS (static)
 // Auth: Firebase Authentication (ID token verified against Google JWKS)
 
 /* ---------- helpers ---------- */
@@ -116,28 +116,75 @@ async function currentUser(request, env) {
 }
 
 /* ---------- items ---------- */
-const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, cover_url, image_key, status, prog_cur, prog_total, created_at, updated_at";
+const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at";
+
+/* 並び順: manual=手動（sort_order 昇順、NULL は後ろ）、title / creator / category / new / old / type */
+function sortClause(sort) {
+  const manual = "(sort_order IS NULL), sort_order ASC, created_at ASC, id ASC";
+  switch (sort) {
+    case "title": return "title ASC, created_at ASC, id ASC";
+    case "creator": return "creator ASC, created_at ASC, id ASC";
+    case "category": return "category ASC, " + manual;
+    case "new": return "created_at DESC, id DESC";
+    case "old": return "created_at ASC, id ASC";
+    case "type": return "type ASC, " + manual;
+    default: return manual; // manual
+  }
+}
 
 async function listItems(request, env, user) {
   const u = new URL(request.url);
   const q = (u.searchParams.get("q") || "").trim();
   const type = u.searchParams.get("type") || "";
+  const category = (u.searchParams.get("category") || "").trim();
+  const sort = u.searchParams.get("sort") || "manual";
   const unread = u.searchParams.get("unread") === "1";
   const withMemo = u.searchParams.get("withMemo") === "1";
-  const limit = Math.min(parseInt(u.searchParams.get("limit") || "28"), 100);
+  const limit = Math.min(parseInt(u.searchParams.get("limit") || "28"), 1000);
   const offset = parseInt(u.searchParams.get("offset") || "0");
   let where = "WHERE user_id = ?";
   const binds = [user.id];
-  if (q) { where += " AND (title LIKE ? OR creator LIKE ?)"; binds.push(`%${q}%`, `%${q}%`); }
+  if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
   if (type && ["book", "cd", "dvd", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
+  if (category) { where += " AND category = ?"; binds.push(category); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
   const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM items ${where}`).bind(...binds).first();
   const rows = await env.DB.prepare(
     `SELECT ${ITEM_COLS}, (SELECT COUNT(*) FROM memos m WHERE m.item_id = items.id) AS memo_count
-     FROM items ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+     FROM items ${where} ORDER BY ${sortClause(sort)} LIMIT ? OFFSET ?`
   ).bind(...binds, limit, offset).all();
   return json({ items: rows.results, total: totalRow.c });
+}
+
+/* 手動並び順を保存する。body { ids: [...] } の順に sort_order=0..n を付け直す */
+async function reorderItems(request, env, user) {
+  const { ids } = await request.json().catch(() => ({}));
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 1000) return err("並び順のリストが不正です");
+  const clean = [...new Set(ids.map((v) => parseInt(v)).filter((v) => Number.isInteger(v) && v > 0))];
+  if (!clean.length) return err("並び順のリストが不正です");
+  /* 自分のアイテムであることを確認（他人の id は無視） */
+  const placeholders = clean.map(() => "?").join(",");
+  const mine = await env.DB.prepare(`SELECT id FROM items WHERE user_id = ? AND id IN (${placeholders})`).bind(user.id, ...clean).all();
+  const mineSet = new Set((mine.results || []).map((r) => r.id));
+  const stmts = [];
+  let n = 0;
+  for (const id of clean) {
+    if (!mineSet.has(id)) continue;
+    stmts.push(env.DB.prepare("UPDATE items SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(n++, Math.floor(Date.now() / 1000), id, user.id));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return json({ ok: true, count: n });
+}
+
+/* 保有場所・カテゴリーの候補一覧（自分のアイテムから重複なし・空除く・昇順） */
+async function listLabels(env, user) {
+  const locs = await env.DB.prepare("SELECT DISTINCT location FROM items WHERE user_id = ? AND location != '' ORDER BY location ASC").bind(user.id).all();
+  const cats = await env.DB.prepare("SELECT DISTINCT category FROM items WHERE user_id = ? AND category != '' ORDER BY category ASC").bind(user.id).all();
+  return json({
+    locations: (locs.results || []).map((r) => r.location),
+    categories: (cats.results || []).map((r) => r.category),
+  });
 }
 
 function validItemBody(b) {
@@ -148,8 +195,15 @@ function validItemBody(b) {
   out.creator = String(b.creator || "").trim();
   out.publisher = String(b.publisher || "").trim();
   out.isbn = String(b.isbn || "").trim();
+  out.catno = String(b.catno || "").trim().slice(0, 40);
+  out.edition = String(b.edition || "").trim().slice(0, 60);
+  out.price = String(b.price || "").trim().slice(0, 20);
+  out.location = String(b.location || "").trim().slice(0, 60);
+  out.category = String(b.category || "").trim().slice(0, 60);
   out.cover_url = String(b.cover_url || "").trim();
   out.image_key = String(b.image_key || "").trim();
+  out.spine_key = String(b.spine_key || "").trim();
+  out.side_key = String(b.side_key || "").trim();
   out.status = ["unread", "reading", "done"].includes(b.status) ? b.status : "unread";
   out.prog_cur = Math.max(0, parseInt(b.prog_cur) || 0);
   out.prog_total = Math.max(0, parseInt(b.prog_total) || 0);
@@ -161,9 +215,9 @@ async function createItem(request, env, user) {
   if (!b) return err("タイトルは必須です");
   const now = Math.floor(Date.now() / 1000);
   const res = await env.DB.prepare(
-    `INSERT INTO items (user_id, type, title, creator, publisher, isbn, cover_url, image_key, status, prog_cur, prog_total, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.cover_url, b.image_key, b.status, b.prog_cur, b.prog_total, now, now).run();
+    `INSERT INTO items (user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
+  ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
   const item = await env.DB.prepare(`SELECT ${ITEM_COLS}, 0 AS memo_count FROM items WHERE id = ?`).bind(res.meta.last_row_id).first();
   return json(item, 201);
 }
@@ -180,8 +234,8 @@ async function updateItem(request, env, user, id) {
   const b = validItemBody(await request.json().catch(() => ({})));
   if (!b) return err("タイトルは必須です");
   await env.DB.prepare(
-    `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, cover_url=?, image_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
-  ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.cover_url, b.image_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
+    `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
+  ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
   return json(await getItem(env, user, id));
 }
 
@@ -190,7 +244,9 @@ async function deleteItem(env, user, id) {
   if (!existing) return err("見つかりません", 404);
   await env.DB.prepare("DELETE FROM memos WHERE item_id = ? AND user_id = ?").bind(id, user.id).run();
   await env.DB.prepare("DELETE FROM items WHERE id = ? AND user_id = ?").bind(id, user.id).run();
-  if (existing.image_key) { try { await env.IMAGES.delete(existing.image_key); } catch (_) {} }
+  for (const key of [existing.image_key, existing.spine_key, existing.side_key]) {
+    await deleteImage(env, key);
+  }
   return json({ ok: true });
 }
 
@@ -223,7 +279,9 @@ async function listAllMemos(env, user) {
   return json({ memos: rows.results });
 }
 
-/* ---------- images (KV) ---------- */
+/* ---------- images (R2 本命 / KV は旧キーの読み取り互換) ----------
+   新規アップロードは R2（IMAGES_R2）へ。バインディングが無い環境では KV へフォールバック。
+   取得は R2 を先に引き、無ければ KV を引く（移行前の既存キーをそのまま読めるように） */
 async function uploadImage(request, env, user) {
   const form = await request.formData().catch(() => null);
   const file = form && form.get("file");
@@ -233,15 +291,34 @@ async function uploadImage(request, env, user) {
   if (!type.startsWith("image/")) return err("画像ファイルを選択してください");
   const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg";
   const key = `${user.id}/${crypto.randomUUID()}.${ext}`;
-  await env.IMAGES.put(key, await file.arrayBuffer(), { metadata: { contentType: type } });
+  const buf = await file.arrayBuffer();
+  if (env.IMAGES_R2) {
+    await env.IMAGES_R2.put(key, buf, { httpMetadata: { contentType: type } });
+  } else {
+    await env.IMAGES.put(key, buf, { metadata: { contentType: type } });
+  }
   return json({ key }, 201);
+}
+async function deleteImage(env, key) {
+  if (!key) return;
+  try { if (env.IMAGES_R2) await env.IMAGES_R2.delete(key); } catch (_) {}
+  try { if (env.IMAGES) await env.IMAGES.delete(key); } catch (_) {}
 }
 async function serveImage(env, user, key) {
   if (!key.startsWith(`${user.id}/`)) return err("見つかりません", 404);
+  if (env.IMAGES_R2) {
+    const obj = await env.IMAGES_R2.get(key).catch(() => null);
+    if (obj) {
+      const ct = (obj.httpMetadata && obj.httpMetadata.contentType) || "image/jpeg";
+      return new Response(obj.body, {
+        headers: { "Content-Type": ct, "Cache-Control": "private, max-age=31536000, immutable", "ETag": obj.httpEtag || "" },
+      });
+    }
+  }
   const obj = await env.IMAGES.getWithMetadata(key, { type: "stream" });
   if (!obj || !obj.value) return err("見つかりません", 404);
   return new Response(obj.value, {
-    headers: { "Content-Type": (obj.metadata && obj.metadata.contentType) || "image/jpeg", "Cache-Control": "private, max-age=86400" },
+    headers: { "Content-Type": (obj.metadata && obj.metadata.contentType) || "image/jpeg", "Cache-Control": "private, max-age=31536000, immutable" },
   });
 }
 
@@ -257,7 +334,21 @@ async function lookupOpenBD(code) {
   const entry = Array.isArray(data) && data[0];
   if (!entry || !entry.summary) return null;
   const s = entry.summary;
-  return { title: s.title || "", creator: s.author || "", publisher: s.publisher || "", isbn: s.isbn || code, cover_url: s.cover || "", type: "book", source: "OpenBD" };
+  /* 価格: onix.ProductSupply.SupplyDetail.Price[].PriceAmount（JPY）。
+     版: onix.DescriptiveDetail.EditionStatement。なければ空（推測で入れない） */
+  let price = "", edition = "";
+  try {
+    const onix = entry.onix || {};
+    const prices = onix.ProductSupply && onix.ProductSupply.SupplyDetail && onix.ProductSupply.SupplyDetail.Price;
+    if (Array.isArray(prices)) {
+      const jpy = prices.find((p) => p.CurrencyCode === "JPY") || prices[0];
+      if (jpy && jpy.PriceAmount != null) price = String(jpy.PriceAmount).replace(/[^\d]/g, "");
+    }
+    const es = onix.DescriptiveDetail && onix.DescriptiveDetail.EditionStatement;
+    if (typeof es === "string") edition = es.trim();
+    else if (es && typeof es.content === "string") edition = es.content.trim();
+  } catch (_) { /* 価格・版が取れなければ空のまま */ }
+  return { title: s.title || "", creator: s.author || "", publisher: s.publisher || "", isbn: s.isbn || code, catno: "", edition, price, cover_url: s.cover || "", type: "book", source: "OpenBD" };
 }
 async function lookupGoogleBooks(code) {
   const r = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(code)}`);
@@ -269,7 +360,7 @@ async function lookupGoogleBooks(code) {
   if (v.imageLinks) {
     cover = (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail || "").replace("http://", "https://").replace("&edge=curl", "");
   }
-  return { title: v.title || "", creator: (v.authors || []).join(", "), publisher: v.publisher || "", isbn: code, cover_url: cover, type: "book", source: "Google Books" };
+  return { title: v.title || "", creator: (v.authors || []).join(", "), publisher: v.publisher || "", isbn: code, catno: "", edition: "", price: "", cover_url: cover, type: "book", source: "Google Books" };
 }
 async function lookupNDL(code) {
   const r = await fetch(`https://ndlsearch.ndl.go.jp/api/opensearch?isbn=${encodeURIComponent(code)}`);
@@ -283,11 +374,28 @@ async function lookupNDL(code) {
   const publisher = xmlTag(itemXml, "dc:publisher");
   const isBookCode = /^(978|979)/.test(code);
   return {
-    title, creator, publisher, isbn: code,
+    title, creator, publisher, isbn: code, catno: "", edition: "", price: "",
     cover_url: isBookCode ? `https://ndlsearch.ndl.go.jp/thumbnail/${code}.jpg` : "",
     type: "other", source: "NDLサーチ",
   };
 }
+/* 版・仕様の推定: release の disambiguation を正とし、タイトル内の
+   （初回限定盤）【初回生産限定盤】[期間生産限定盤] 等の括弧書きも補う。
+   タイトル自体は変更しない */
+function mbEdition(rel) {
+  const parts = [];
+  const dis = String(rel.disambiguation || "").trim();
+  if (dis) parts.push(dis);
+  const title = String(rel.title || "");
+  const re = /[（(【\[]([^）)\]】]{1,40})[）)\]】]/g;
+  let m;
+  while ((m = re.exec(title)) !== null) {
+    const inner = m[1].trim();
+    if (/(初回|限定|通常盤|生産限定)/.test(inner) && !parts.includes(inner)) parts.push(inner);
+  }
+  return parts.join("／").slice(0, 60);
+}
+
 async function lookupMusicBrainz(code) {
   const r = await fetch(`https://musicbrainz.org/ws/2/release/?query=barcode:${encodeURIComponent(code)}&fmt=json`, {
     headers: { "User-Agent": "BookshelfApp/1.0 (personal bookshelf manager)", "Accept": "application/json" },
@@ -301,12 +409,63 @@ async function lookupMusicBrainz(code) {
     creator: (rel["artist-credit"] || []).map((a) => a.name).join(", "),
     publisher: (rel["label-info"] || []).map((l) => l.label && l.label.name).filter(Boolean).join(", "),
     isbn: code,
+    catno: (rel["label-info"] || []).map((l) => l["catalog-number"]).filter(Boolean)[0] || "",
+    edition: mbEdition(rel),
+    price: "",
     cover_url: rel.id ? `https://coverartarchive.org/release/${rel.id}/front-500` : "",
     type: "cd", source: "MusicBrainz",
   };
 }
+
+/* 規格品番（カタログ番号）で MusicBrainz のリリースを検索する。
+   入力の表記ゆれ（ハイフンあり/なし）に対応するため、複数パターンを順に試す */
+function mbReleaseToLookup(rel) {
+  return {
+    title: rel.title || "",
+    creator: (rel["artist-credit"] || []).map((a) => a.name).join(", "),
+    publisher: (rel["label-info"] || []).map((l) => l.label && l.label.name).filter(Boolean).join(", "),
+    isbn: rel.barcode || "",
+    catno: (rel["label-info"] || []).map((l) => l["catalog-number"]).filter(Boolean)[0] || "",
+    edition: mbEdition(rel),
+    price: "",
+    cover_url: rel.id ? `https://coverartarchive.org/release/${rel.id}/front-500` : "",
+    type: "cd", source: "MusicBrainz",
+  };
+}
+async function lookupMusicBrainzByCatno(raw) {
+  const norm = String(raw || "").trim().toUpperCase().replace(/\s+/g, "");
+  if (!norm || norm.length < 4) return [];
+  const noHyphen = norm.replace(/-/g, "");
+  /* ハイフンあり/なしの2パターンのみ。ワイルドカードは無関係な作品を
+     拾ってしまうため使わない（存在しない品番は空を返すのが正しい） */
+  const queries = [...new Set([`catno:"${norm}"`, `catno:"${noHyphen}"`])];
+  const results = [];
+  for (const q of queries) {
+    try {
+      const r = await fetch(`https://musicbrainz.org/ws/2/release/?query=${encodeURIComponent(q)}&fmt=json&limit=5`, {
+        headers: { "User-Agent": "BookshelfApp/1.0 (personal bookshelf manager)", "Accept": "application/json" },
+      });
+      if (!r.ok) continue;
+      const data = await r.json();
+      for (const rel of data.releases || []) {
+        if (!rel.title) continue;
+        const hit = mbReleaseToLookup(rel);
+        if (!results.some((x) => x.title === hit.title && x.catno === hit.catno)) results.push(hit);
+      }
+      if (results.length) break;
+    } catch (_) { /* try next variant */ }
+  }
+  return results.slice(0, 2);
+}
 async function handleLookup(request) {
-  const code = (new URL(request.url).searchParams.get("code") || "").replace(/[-\s]/g, "");
+  const params = new URL(request.url).searchParams;
+  const catno = (params.get("catno") || "").trim();
+  if (catno) {
+    if (catno.length < 4) return err("品番が短すぎます");
+    const results = await lookupMusicBrainzByCatno(catno);
+    return json({ results, catno });
+  }
+  const code = (params.get("code") || "").replace(/[-\s]/g, "");
   if (!code || code.length < 8) return err("コードが短すぎます");
   const isBookCode = /^(978|979)/.test(code);
   const chain = isBookCode
@@ -328,12 +487,14 @@ function buildItemFilter(request) {
   const u = new URL(request.url);
   const q = (u.searchParams.get("q") || "").trim();
   const type = u.searchParams.get("type") || "";
+  const category = (u.searchParams.get("category") || "").trim();
   const unread = u.searchParams.get("unread") === "1";
   const withMemo = u.searchParams.get("withMemo") === "1";
   let where = "WHERE user_id = ?";
   const binds = [];
-  if (q) { where += " AND (title LIKE ? OR creator LIKE ?)"; binds.push(`%${q}%`, `%${q}%`); }
+  if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
   if (type && ["book", "cd", "dvd", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
+  if (category) { where += " AND category = ?"; binds.push(category); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
   return { where, binds };
@@ -365,12 +526,12 @@ async function exportCsv(request, env, user) {
     if (!memoMap.has(m.item_id)) memoMap.set(m.item_id, []);
     memoMap.get(m.item_id).push(m.body);
   }
-  const header = ["ID", "種別", "タイトル", "著者/アーティスト", "出版社/レーベル", "ISBN/バーコード", "状態", "進捗（現在）", "進捗（全体）", "進捗率", "メモ件数", "メモ", "表紙URL", "登録日時", "更新日時"];
+  const header = ["ID", "種別", "タイトル", "著者/アーティスト", "出版社/レーベル", "ISBN/バーコード", "規格品番", "版・仕様", "価格", "保有場所", "カテゴリー", "状態", "進捗（現在）", "進捗（全体）", "進捗率", "メモ件数", "メモ", "表紙URL", "登録日時", "更新日時"];
   const lines = [header.map(csvCell).join(",")];
   for (const it of items) {
     const pct = it.prog_total > 0 ? Math.min(100, Math.round((it.prog_cur / it.prog_total) * 100)) + "%" : "";
     lines.push([
-      it.id, it.type, it.title, it.creator || "", it.publisher || "", it.isbn || "", it.status,
+      it.id, it.type, it.title, it.creator || "", it.publisher || "", it.isbn || "", it.catno || "", it.edition || "", it.price || "", it.location || "", it.category || "", it.status,
       it.prog_cur || 0, it.prog_total || 0, pct, it.memo_count || 0,
       (memoMap.get(it.id) || []).join("\n"), it.cover_url || "", fmtJST(it.created_at), fmtJST(it.updated_at),
     ].map(csvCell).join(","));
@@ -401,6 +562,8 @@ export default {
         const user = await currentUser(request, env);
         if (!user) return json({ error: "unauthorized" }, 401);
         if (path === "/api/auth/me" && request.method === "GET") return json(user);
+        if (path === "/api/items/reorder" && request.method === "PUT") return reorderItems(request, env, user);
+        if (path === "/api/labels" && request.method === "GET") return listLabels(env, user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
         if (path === "/api/export.csv" && request.method === "GET") return exportCsv(request, env, user);
         if (path === "/api/items" && request.method === "POST") return createItem(request, env, user);

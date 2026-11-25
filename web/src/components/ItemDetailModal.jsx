@@ -3,8 +3,9 @@ import Modal from "./Modal.jsx";
 import Cover from "./Cover.jsx";
 import { api, apiJson } from "../api.js";
 import { useApp } from "../store.jsx";
-import { TYPE_BADGE, fmtDate } from "../utils.js";
+import { TYPE_BADGE, externalLinks, fmtDate, fmtPrice } from "../utils.js";
 import { IconCamera } from "./Icons.jsx";
+import AuthedImage from "./AuthedImage.jsx";
 
 export default function ItemDetailModal() {
   const { detail, closeDetail, openCoverEditor, toast, bumpItems } = useApp();
@@ -13,8 +14,12 @@ export default function ItemDetailModal() {
   const [memoInput, setMemoInput] = useState("");
   const [fields, setFields] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [labels, setLabels] = useState({ locations: [], categories: [] });
+  const [slotBusy, setSlotBusy] = useState(false);
   const memoRef = useRef(null);
   const coverFileRef = useRef(null);
+  const slotFileRef = useRef(null);
+  const slotFieldRef = useRef(null);
 
   const id = detail && detail.id;
 
@@ -33,9 +38,11 @@ export default function ItemDetailModal() {
         setItem(it);
         setFields({
           type: it.type, status: it.status, title: it.title,
-          creator: it.creator || "", publisher: it.publisher || "", isbn: it.isbn || "",
+          creator: it.creator || "", publisher: it.publisher || "", isbn: it.isbn || "", catno: it.catno || "",
+          edition: it.edition || "", price: it.price || "", location: it.location || "", category: it.category || "",
           prog_cur: it.prog_cur || "", prog_total: it.prog_total || "",
         });
+        api("/api/labels").then((d) => { if (!cancelled) setLabels(d); }).catch(() => {});
         await loadMemos(id);
         if (detail.focusMemo && memoRef.current) {
           setTimeout(() => memoRef.current && memoRef.current.focus(), 120);
@@ -62,6 +69,8 @@ export default function ItemDetailModal() {
         ...fields,
         cover_url: item.cover_url || "",
         image_key: item.image_key || "",
+        spine_key: item.spine_key || "",
+        side_key: item.side_key || "",
         prog_cur: fields.prog_cur === "" ? 0 : parseInt(fields.prog_cur, 10) || 0,
         prog_total: fields.prog_total === "" ? 0 : parseInt(fields.prog_total, 10) || 0,
       });
@@ -122,6 +131,40 @@ export default function ItemDetailModal() {
     });
   };
 
+  /* 画像スロット（表表紙=image_key／背表紙=spine_key／横=side_key）の差し替え・削除 */
+  const putItemKey = async (field, key, msg) => {
+    if (!item || slotBusy) return;
+    setSlotBusy(true);
+    try {
+      const updated = await apiJson(`/api/items/${item.id}`, "PUT", { ...item, [field]: key });
+      setItem(updated);
+      bumpItems();
+      toast(msg);
+    } catch (err) { toast(err.message); } finally { setSlotBusy(false); }
+  };
+  const onSlotFile = async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    const field = slotFieldRef.current;
+    if (!f || !item || !field) return;
+    setSlotBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const res = await api("/api/images", { method: "POST", body: fd });
+      const updated = await apiJson(`/api/items/${item.id}`, "PUT", { ...item, [field]: res.key });
+      setItem(updated);
+      bumpItems();
+      toast("画像を更新しました");
+    } catch (err) { toast(err.message); } finally { setSlotBusy(false); }
+  };
+  const pickSlotFile = (field) => {
+    slotFieldRef.current = field;
+    if (slotFileRef.current) slotFileRef.current.click();
+  };
+
+  const links = item ? externalLinks(item) : [];
+
   return (
     <Modal onClose={closeDetail}>
       {!item || !fields ? (
@@ -136,10 +179,24 @@ export default function ItemDetailModal() {
               <div className="badge-row">
                 <span className="badge">{TYPE_BADGE[item.type] || "ITEM"}</span>
                 {item.isbn && <span className="badge badge-muted">ISBN {item.isbn}</span>}
+                {item.catno && <span className="badge badge-muted">品番 {item.catno}</span>}
+                {item.edition && <span className="badge badge-muted">{item.edition}</span>}
+                {item.price && <span className="badge badge-muted">{fmtPrice(item.price)}</span>}
+                {item.location && <span className="badge badge-muted">保有場所: {item.location}</span>}
+                {item.category && <span className="badge badge-muted">{item.category}</span>}
               </div>
               <h2>{item.title}</h2>
               <p className="muted">{item.creator || ""}</p>
               <p className="muted small">{item.publisher || ""}</p>
+              {links.length > 0 && (
+                <div className="ext-links" style={{ marginTop: 4, marginBottom: 10 }}>
+                  {links.map((l) => (
+                    <a key={l.label} className="ext-link" href={l.href} target="_blank" rel="noopener noreferrer">
+                      {l.label} ↗
+                    </a>
+                  ))}
+                </div>
+              )}
               <button type="button" className="btn-secondary btn-small" onClick={() => coverFileRef.current && coverFileRef.current.click()}>
                 <IconCamera size={15} /> 表紙の写真を変更
               </button>
@@ -170,12 +227,61 @@ export default function ItemDetailModal() {
               <label>著者 / アーティスト<input type="text" value={fields.creator} onChange={set("creator")} /></label>
               <label>出版社 / レーベル<input type="text" value={fields.publisher} onChange={set("publisher")} /></label>
               <label>ISBN / バーコード<input type="text" value={fields.isbn} onChange={set("isbn")} /></label>
+              <label>規格品番（CD/DVD/BD）<input type="text" value={fields.catno} onChange={set("catno")} placeholder="例: VICL-12345" /></label>
+              <label>版・仕様<input type="text" value={fields.edition} onChange={set("edition")} placeholder="例: 初回限定盤" /></label>
+              <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
+              <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="detail-locations" /></label>
+              <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="detail-categories" /></label>
+              <datalist id="detail-locations">
+                {labels.locations.map((v) => <option key={v} value={v} />)}
+              </datalist>
+              <datalist id="detail-categories">
+                {labels.categories.map((v) => <option key={v} value={v} />)}
+              </datalist>
             </div>
             <div className="row-gap">
               <button type="submit" className="btn-primary" disabled={busy}>{busy ? "保存中…" : "保存する"}</button>
               <button type="button" className="btn-danger" onClick={remove}>このアイテムを削除</button>
             </div>
           </form>
+
+          <div className="divider" />
+          <h3>画像</h3>
+          <p className="muted small">表表紙・背表紙・横（側面）の写真は任意登録です。棚では背表紙→横→表表紙の順に使われます。未登録の場合は取得した表紙情報がそのまま使われます。</p>
+          <div className="slot-grid">
+            {[
+              { field: "image_key", label: "表表紙", keyVal: item.image_key },
+              { field: "spine_key", label: "背表紙", keyVal: item.spine_key },
+              { field: "side_key", label: "横", keyVal: item.side_key },
+            ].map((s) => (
+              <div className="slot" key={s.field}>
+                <div className="slot-label">{s.label}</div>
+                <div className="slot-preview">
+                  {s.keyVal ? (
+                    <AuthedImage src={`/api/images/${encodeURIComponent(s.keyVal)}`} alt={s.label} />
+                  ) : (
+                    <span className="slot-empty">未登録</span>
+                  )}
+                </div>
+                <div className="slot-actions">
+                  <button type="button" className="btn-secondary" disabled={slotBusy} onClick={() => pickSlotFile(s.field)}>
+                    {s.keyVal ? "差し替え" : "登録"}
+                  </button>
+                  {s.field === "image_key" && (
+                    <button type="button" className="btn-secondary" disabled={slotBusy} onClick={() => coverFileRef.current && coverFileRef.current.click()}>
+                      台形補正
+                    </button>
+                  )}
+                  {s.keyVal && (
+                    <button type="button" className="btn-secondary" disabled={slotBusy} onClick={() => putItemKey(s.field, "", `${s.label}の画像を削除しました`)}>
+                      削除
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          <input ref={slotFileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onSlotFile} />
 
           <div className="divider" />
           <h3>メモ <span className="muted small">（{memos.length}件）</span></h3>

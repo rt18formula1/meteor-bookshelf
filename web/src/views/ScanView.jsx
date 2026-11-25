@@ -8,6 +8,7 @@ export default function ScanView() {
   const { toast, openForm } = useApp();
   const [scanning, setScanning] = useState(false);
   const [code, setCode] = useState("");
+  const [catno, setCatno] = useState("");
   const [lookupStatus, setLookupStatus] = useState("");
   const [results, setResults] = useState([]);
   const [ocrBusy, setOcrBusy] = useState(false);
@@ -26,6 +27,24 @@ export default function ScanView() {
       const data = await api(`/api/lookup?code=${encodeURIComponent(c)}`);
       if (!data.results.length) {
         setLookupStatus("見つかりませんでした。手動登録をお試しください。");
+        return;
+      }
+      setLookupStatus(`${data.results.length}件見つかりました。タップで登録フォームに反映します。`);
+      setResults(data.results);
+    } catch (e) {
+      setLookupStatus("検索に失敗しました: " + e.message);
+    }
+  };
+
+  const doCatnoLookup = async (rawCatno) => {
+    const c = String(rawCatno || "").trim();
+    if (!c) return;
+    setLookupStatus("品番で検索中…");
+    setResults([]);
+    try {
+      const data = await api(`/api/lookup?catno=${encodeURIComponent(c)}`);
+      if (!data.results.length) {
+        setLookupStatus("見つかりませんでした。品番を確認するか、手動登録をお試しください。");
         return;
       }
       setLookupStatus(`${data.results.length}件見つかりました。タップで登録フォームに反映します。`);
@@ -157,6 +176,20 @@ export default function ScanView() {
             <button className="btn-secondary" onClick={() => doLookup(code)}>検索</button>
           </div>
         </label>
+        <div className="divider" />
+        <label>規格品番で探す
+          <div className="row-gap">
+            <input
+              type="text"
+              placeholder="例: VICL-12345 / SRCL-99999"
+              value={catno}
+              onChange={(e) => setCatno(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); doCatnoLookup(catno); } }}
+            />
+            <button className="btn-secondary" onClick={() => doCatnoLookup(catno)}>検索</button>
+          </div>
+        </label>
+        <p className="muted small">CD・DVD・BD の帯やジャケットに記載の品番（カタログ番号）で MusicBrainz から作品を特定します。</p>
         {lookupStatus && <p className="muted small">{lookupStatus}</p>}
         <div>
           {results.map((r, i) => (
@@ -164,7 +197,7 @@ export default function ScanView() {
               {r.cover_url && <img src={r.cover_url} alt="" onError={(e) => { e.currentTarget.remove(); }} />}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="list-title">{r.title}</div>
-                <div className="list-sub">{r.creator || ""} ／ {r.source} ／ {TYPE_LABEL[r.type] || ""}</div>
+                <div className="list-sub">{r.creator || ""} ／ {r.source} ／ {TYPE_LABEL[r.type] || ""}{r.catno ? ` ／ 品番 ${r.catno}` : ""}{r.edition ? ` ／ ${r.edition}` : ""}{r.price ? ` ／ ¥${Number(r.price).toLocaleString("ja-JP")}` : ""}</div>
               </div>
               <button className="btn-primary btn-small">登録</button>
             </div>

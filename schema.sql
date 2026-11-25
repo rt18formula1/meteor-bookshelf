@@ -22,8 +22,16 @@ CREATE TABLE IF NOT EXISTS items (
   creator TEXT DEFAULT '',
   publisher TEXT DEFAULT '',
   isbn TEXT DEFAULT '',
+  catno TEXT DEFAULT '',             -- 規格品番（カタログ番号、CD/DVD/BD）
+  edition TEXT DEFAULT '',           -- 版・仕様（初回限定盤など）
+  price TEXT DEFAULT '',              -- 価格（数字文字列、円）
+  location TEXT DEFAULT '',           -- 保有場所（本棚 / Kindle 等、自由ラベル）
+  category TEXT DEFAULT '',           -- オリジナルカテゴリー（自由ラベル）
   cover_url TEXT DEFAULT '',
-  image_key TEXT DEFAULT '',
+  image_key TEXT DEFAULT '',           -- 表表紙の画像キー（KV）
+  spine_key TEXT DEFAULT '',           -- 背表紙の画像キー（KV）
+  side_key TEXT DEFAULT '',            -- 横（側面）の画像キー（KV）
+  sort_order INTEGER,                 -- 手動並び順（NULL は未設定）
   status TEXT NOT NULL DEFAULT 'unread',   -- unread | reading | done
   prog_cur INTEGER DEFAULT 0,
   prog_total INTEGER DEFAULT 0,

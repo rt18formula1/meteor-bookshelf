@@ -70,6 +70,49 @@ export function coverSrc(item) {
   return "";
 }
 
+/* 棚に並べたときの見た目: 背表紙の写真 → 横（側面）の写真 → 表表紙の順で使う */
+export function spineSrc(item) {
+  if (!item) return "";
+  if (item.spine_key) return `/api/images/${encodeURIComponent(item.spine_key)}`;
+  if (item.side_key) return `/api/images/${encodeURIComponent(item.side_key)}`;
+  return coverSrc(item);
+}
+
+/* 価格の表示整形: 数値だけなら ¥1,650 形式、それ以外はそのまま */
+export function fmtPrice(price) {
+  const s = String(price || "").trim();
+  if (!s) return "";
+  if (/^\d+$/.test(s)) return "¥" + Number(s).toLocaleString("ja-JP");
+  return s;
+}
+
+/* 外部サービスへの検索リンク（種別に応じて出し分け） */
+export function externalLinks(item) {
+  if (!item) return [];
+  const q = encodeURIComponent([item.creator, item.title].filter(Boolean).join(" ").trim() || item.title || "");
+  const titleQ = encodeURIComponent(item.title || "");
+  switch (item.type) {
+    case "cd":
+      return [
+        { label: "Spotify で探す", href: `https://open.spotify.com/search/${q}` },
+        { label: "Amazon Music で探す", href: `https://music.amazon.co.jp/search/${q}` },
+      ];
+    case "book":
+      return [
+        { label: "Kindle で探す", href: `https://www.amazon.co.jp/s?k=${encodeURIComponent([item.title, item.creator].filter(Boolean).join(" "))}&i=digital-text` },
+        { label: "Amazon で探す", href: `https://www.amazon.co.jp/s?k=${encodeURIComponent(item.isbn || item.title || "")}` },
+      ];
+    case "dvd":
+      return [
+        { label: "Amazon で探す", href: `https://www.amazon.co.jp/s?k=${encodeURIComponent(item.catno || item.title || "")}` },
+      ];
+    default:
+      return [
+        { label: "Amazon で探す", href: `https://www.amazon.co.jp/s?k=${titleQ}` },
+      ];
+  }
+}
+
 export function fmtDate(ts) {
   if (!ts) return "";
   const d = new Date(ts * 1000);

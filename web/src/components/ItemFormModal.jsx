@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import Modal from "./Modal.jsx";
-import { apiJson } from "../api.js";
+import { api, apiJson } from "../api.js";
 import { useApp } from "../store.jsx";
 import { IconCamera } from "./Icons.jsx";
+import AuthedImage from "./AuthedImage.jsx";
 
 const EMPTY = {
   type: "book", status: "unread", title: "", creator: "", publisher: "",
-  isbn: "", cover_url: "", prog_cur: "", prog_total: "",
+  isbn: "", catno: "", edition: "", price: "", location: "", category: "",
+  cover_url: "", prog_cur: "", prog_total: "",
 };
 
 export default function ItemFormModal() {
@@ -14,6 +16,7 @@ export default function ItemFormModal() {
   const [fields, setFields] = useState(EMPTY);
   const [imageKey, setImageKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [labels, setLabels] = useState({ locations: [], categories: [] });
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -25,11 +28,18 @@ export default function ItemFormModal() {
         creator: formPrefill.creator || "",
         publisher: formPrefill.publisher || "",
         isbn: formPrefill.isbn || "",
+        catno: formPrefill.catno || "",
+        edition: formPrefill.edition || "",
+        price: formPrefill.price != null ? String(formPrefill.price) : "",
+        location: formPrefill.location || "",
+        category: formPrefill.category || "",
         cover_url: formPrefill.cover_url || "",
         prog_cur: formPrefill.prog_cur ?? "",
         prog_total: formPrefill.prog_total ?? "",
       });
       setImageKey(formPrefill.image_key || "");
+      /* 保有場所・カテゴリーの候補（取得できなければ通常のテキスト入力のまま） */
+      api("/api/labels").then(setLabels).catch(() => {});
     }
   }, [formPrefill]);
 
@@ -71,7 +81,7 @@ export default function ItemFormModal() {
       <h2>アイテムを登録</h2>
       {previewUrl && (
         <div className="form-cover-preview">
-          <img src={previewUrl} alt="" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+          <AuthedImage src={previewUrl} alt="" onError={(e) => { e.currentTarget.style.display = "none"; }} />
         </div>
       )}
       <form onSubmit={submit}>
@@ -95,7 +105,18 @@ export default function ItemFormModal() {
           <label>著者 / アーティスト<input type="text" value={fields.creator} onChange={set("creator")} /></label>
           <label>出版社 / レーベル<input type="text" value={fields.publisher} onChange={set("publisher")} /></label>
           <label>ISBN / バーコード<input type="text" value={fields.isbn} onChange={set("isbn")} /></label>
+          <label>規格品番（CD/DVD/BD）<input type="text" value={fields.catno} onChange={set("catno")} placeholder="例: VICL-12345" /></label>
+          <label>版・仕様<input type="text" value={fields.edition} onChange={set("edition")} placeholder="例: 初回限定盤" /></label>
+          <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
+          <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="form-locations" /></label>
+          <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="form-categories" /></label>
           <label>表紙画像URL<input type="text" value={fields.cover_url} onChange={set("cover_url")} placeholder="https://..." /></label>
+          <datalist id="form-locations">
+            {labels.locations.map((v) => <option key={v} value={v} />)}
+          </datalist>
+          <datalist id="form-categories">
+            {labels.categories.map((v) => <option key={v} value={v} />)}
+          </datalist>
           <label>進捗（現在）<input type="number" min="0" value={fields.prog_cur} onChange={set("prog_cur")} /></label>
           <label>進捗（全体）<input type="number" min="0" value={fields.prog_total} onChange={set("prog_total")} /></label>
         </div>

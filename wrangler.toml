@@ -17,3 +17,8 @@ database_id = "0f826884-9cad-4760-81ce-a79553426b3d"
 [[kv_namespaces]]
 binding = "IMAGES"
 id = "ce377a431ffd49109d95da61b942e697"
+
+# 画像の保存先は R2（本命）。KV バインディングは旧キーの読み取り互換用に残す
+[[r2_buckets]]
+binding = "IMAGES_R2"
+bucket_name = "meteor-bookshelf-images"
