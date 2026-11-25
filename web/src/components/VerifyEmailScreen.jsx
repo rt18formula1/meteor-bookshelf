@@ -85,7 +85,12 @@ export default function VerifyEmailScreen() {
           emailVerified: updated.emailVerified,
           isPasswordUser: updated.providerData.some((p) => p.providerId === "password"),
         });
-        if (!updated.emailVerified) {
+        if (updated.emailVerified) {
+          /* 確認完了後は ID トークンを強制更新する。reload() だけではトークンが更新されず、
+             確認前に発行された古いトークン（email_verified=false）が最大1時間使われ、
+             Worker が全 API を 401（email_not_verified）で拒否し続けるため */
+          await updated.getIdToken(true).catch(() => {});
+        } else {
           setNotice("まだ認証が完了していません。メール内のリンクを開いてから、もう一度お試しください。");
         }
       }

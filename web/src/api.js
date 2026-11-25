@@ -15,11 +15,34 @@ async function authHeaders(extra = {}) {
   return headers;
 }
 
+/* Worker から返るエラーコードを分かりやすい日本語の案内に変換する */
+const FRIENDLY_ERRORS = {
+  email_not_verified: "メール確認が完了していません。確認メールのリンクを開いてから、もう一度お試しください。",
+};
+function toFriendlyError(error, status) {
+  return FRIENDLY_ERRORS[error] || error || `エラー (${status})`;
+}
+
 export async function api(path, opts = {}) {
   const headers = await authHeaders(opts.headers || {});
-  const res = await fetch(path, { ...opts, headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `エラー (${res.status})`);
+  let res = await fetch(path, { ...opts, headers });
+  let data = await res.json().catch(() => ({}));
+  if (!res.ok && res.status === 401 && data.error === "email_not_verified") {
+    /* 確認直後は古い ID トークン（email_verified=false）が残っていることがある。
+       トークンを強制更新して1回だけやり直す。やり直しも同じエラーならそのまま返す */
+    const u = auth.currentUser;
+    if (u) {
+      try {
+        await u.getIdToken(true);
+        const retryHeaders = await authHeaders(opts.headers || {});
+        res = await fetch(path, { ...opts, headers: retryHeaders });
+        data = await res.json().catch(() => ({}));
+      } catch (_) {
+        /* 強制更新に失敗した場合は、元の 401 をエラーとして扱う */
+      }
+    }
+  }
+  if (!res.ok) throw new Error(toFriendlyError(data.error, res.status));
   return data;
 }
 
@@ -61,7 +84,7 @@ export async function downloadCsv(params = {}) {
   const res = await fetch(`/api/export.csv?${qs}`, { headers });
   if (!res.ok) {
     const d = await res.json().catch(() => ({}));
-    throw new Error(d.error || `エラー (${res.status})`);
+    throw new Error(toFriendlyError(d.error, res.status));
   }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
@@ -88,7 +111,7 @@ export async function downloadXlsx(params = {}) {
   const res = await fetch(`/api/export.json?${qs}`, { headers });
   if (!res.ok) {
     const d = await res.json().catch(() => ({}));
-    throw new Error(d.error || `エラー (${res.status})`);
+    throw new Error(toFriendlyError(d.error, res.status));
   }
   const data = await res.json();
   const XLSX = await import("xlsx");
