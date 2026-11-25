@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { signOut } from "firebase/auth";
 import { auth } from "../firebase.js";
-import { api, downloadCsv } from "../api.js";
+import { api, apiJson, downloadCsv } from "../api.js";
 import { useApp } from "../store.jsx";
 import { IconDownload } from "../components/Icons.jsx";
 
@@ -17,6 +17,149 @@ async function fetchAllItems() {
     if (all.length >= data.total || data.items.length === 0 || all.length >= 5000) break;
   }
   return all;
+}
+
+/* Notion 連携設定カード。
+   トークンはサーバーに保存されるだけで、画面には再表示されない（設定済みかどうかだけ分かる）。 */
+function NotionCard() {
+  const { toast } = useApp();
+  const [loaded, setLoaded] = useState(false);
+  const [hasToken, setHasToken] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [dbId, setDbId] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null); // { ok, message }
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api("/api/settings");
+        if (cancelled) return;
+        setHasToken(!!s.has_notion_token);
+        setDbId(s.notion_db_id || "");
+        setEnabled(!!s.notion_enabled);
+      } catch (_) {}
+      if (!cancelled) setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const body = { notion_db_id: dbId, notion_enabled: enabled };
+      if (tokenInput.trim()) body.notion_token = tokenInput.trim();
+      const s = await apiJson("/api/settings", "PUT", body);
+      setHasToken(!!s.has_notion_token);
+      setDbId(s.notion_db_id || "");
+      setEnabled(!!s.notion_enabled);
+      setTokenInput("");
+      toast("Notion連携の設定を保存しました");
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearToken = async () => {
+    setSaving(true);
+    try {
+      const s = await apiJson("/api/settings", "PUT", { clear_notion_token: true });
+      setHasToken(!!s.has_notion_token);
+      setTokenInput("");
+      toast("トークンを削除しました");
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const test = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const body = { notion_db_id: dbId };
+      if (tokenInput.trim()) body.notion_token = tokenInput.trim();
+      const r = await apiJson("/api/notion/test", "POST", body);
+      if (r.ok) setTestResult({ ok: true, message: `接続できました（データベース: ${r.database_title || "（名称なし）"}）` });
+      else setTestResult({ ok: false, message: `接続できませんでした: ${r.error || "不明なエラー"}` });
+    } catch (e) {
+      setTestResult({ ok: false, message: `接続できませんでした: ${e.message}` });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h3>Notion連携</h3>
+      <p className="muted small">
+        アプリでアイテムを追加・変更・削除すると、Notion のデータベースにも自動で反映されます（アプリ → Notion の一方向同期）。
+        Notion 側のプロパティ名（作者・出版社・ISBN・規格品番・カテゴリー・保有場所・種別・状態・価格・登録日など）に合わせて値が入ります。
+      </p>
+      <ol className="muted small" style={{ paddingLeft: 20, margin: "8px 0 12px" }}>
+        <li>notion.so/my-integrations でインテグレーションを作成し、トークンをコピーします</li>
+        <li>連携先データベースの「•••」メニュー →「コネクトの追加」で、そのインテグレーションを接続します</li>
+        <li>データベースの ID（URL に含まれる 32 桁の文字列）を下に貼り付けます</li>
+      </ol>
+      <label>
+        インテグレーショントークン
+        {hasToken && <span className="badge badge-muted" style={{ marginLeft: 8 }}>設定済み</span>}
+        <input
+          type="password"
+          value={tokenInput}
+          onChange={(e) => setTokenInput(e.target.value)}
+          placeholder={hasToken ? "変更する場合のみ入力してください" : "secret_... / ntn_..."}
+          autoComplete="off"
+          disabled={!loaded}
+        />
+      </label>
+      <label>
+        データベース ID
+        <input
+          type="text"
+          value={dbId}
+          onChange={(e) => setDbId(e.target.value)}
+          placeholder="例: 0123456789abcdef0123456789abcdef"
+          autoComplete="off"
+          disabled={!loaded}
+        />
+      </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+          style={{ width: "auto", margin: 0 }}
+          disabled={!loaded}
+        />
+        Notion連携を有効にする
+      </label>
+      <div className="row-gap wrap">
+        <button className="btn-primary" onClick={save} disabled={!loaded || saving}>
+          {saving ? "保存中…" : "保存"}
+        </button>
+        <button className="btn-secondary" onClick={test} disabled={!loaded || testing}>
+          {testing ? "接続テスト中…" : "接続テスト"}
+        </button>
+        {hasToken && (
+          <button className="btn-secondary" onClick={clearToken} disabled={!loaded || saving}>
+            トークンを削除
+          </button>
+        )}
+      </div>
+      {testResult && (
+        <p className="small" style={{ marginTop: 10, color: testResult.ok ? "#2e6b2e" : "#b03030" }}>
+          {testResult.message}
+        </p>
+      )}
+    </div>
+  );
 }
 
 export default function SettingsView() {
@@ -86,6 +229,7 @@ export default function SettingsView() {
           ログアウト
         </button>
       </div>
+      <NotionCard />
       <div className="card">
         <h3>データのエクスポート</h3>
         <p className="muted small">自分の棚の全アイテムをCSVでダウンロードできます。Excelで日本語が文字化けしない形式です。</p>

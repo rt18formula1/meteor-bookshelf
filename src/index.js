@@ -102,9 +102,11 @@ async function currentUser(request, env) {
   if (!payload) return null;
   const uid = payload.sub;
   const email = String(payload.email).toLowerCase();
-  let user = await env.DB.prepare("SELECT id, email FROM users WHERE firebase_uid = ?").bind(uid).first();
+  /* Notion 連携設定も含めて返す（内部利用のみ。API レスポンスに出す場合は呼び出し側で絞ること） */
+  const cols = "id, email, notion_token, notion_db_id, notion_enabled";
+  let user = await env.DB.prepare(`SELECT ${cols} FROM users WHERE firebase_uid = ?`).bind(uid).first();
   if (user) return user;
-  user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?").bind(email).first();
+  user = await env.DB.prepare(`SELECT ${cols} FROM users WHERE email = ?`).bind(email).first();
   if (user) {
     await env.DB.prepare("UPDATE users SET firebase_uid = ? WHERE id = ?").bind(uid, user.id).run();
     return user;
@@ -112,11 +114,11 @@ async function currentUser(request, env) {
   const res = await env.DB.prepare(
     "INSERT INTO users (email, pass_hash, salt, firebase_uid, created_at) VALUES (?, '', '', ?, ?)"
   ).bind(email, uid, Math.floor(Date.now() / 1000)).run();
-  return { id: res.meta.last_row_id, email };
+  return { id: res.meta.last_row_id, email, notion_token: "", notion_db_id: "", notion_enabled: 0 };
 }
 
 /* ---------- items ---------- */
-const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at";
+const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, cover_url, image_key, spine_key, side_key, sort_order, notion_page_id, status, prog_cur, prog_total, created_at, updated_at";
 
 /* 並び順: manual=手動（sort_order 昇順、NULL は後ろ）、title / creator / category / new / old / type */
 function sortClause(sort) {
@@ -210,7 +212,7 @@ function validItemBody(b) {
   return out;
 }
 
-async function createItem(request, env, user) {
+async function createItem(request, env, user, ctx) {
   const b = validItemBody(await request.json().catch(() => ({})));
   if (!b) return err("タイトルは必須です");
   const now = Math.floor(Date.now() / 1000);
@@ -219,6 +221,7 @@ async function createItem(request, env, user) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
   ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
   const item = await env.DB.prepare(`SELECT ${ITEM_COLS}, 0 AS memo_count FROM items WHERE id = ?`).bind(res.meta.last_row_id).first();
+  if (ctx) ctx.waitUntil(syncToNotion(env, user, item, "create"));
   return json(item, 201);
 }
 
@@ -228,7 +231,7 @@ async function getItem(env, user, id) {
   ).bind(id, user.id).first();
 }
 
-async function updateItem(request, env, user, id) {
+async function updateItem(request, env, user, id, ctx) {
   const existing = await getItem(env, user, id);
   if (!existing) return err("見つかりません", 404);
   const b = validItemBody(await request.json().catch(() => ({})));
@@ -236,10 +239,12 @@ async function updateItem(request, env, user, id) {
   await env.DB.prepare(
     `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
   ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
-  return json(await getItem(env, user, id));
+  const updated = await getItem(env, user, id);
+  if (ctx) ctx.waitUntil(syncToNotion(env, user, updated, "update"));
+  return json(updated);
 }
 
-async function deleteItem(env, user, id) {
+async function deleteItem(env, user, id, ctx) {
   const existing = await getItem(env, user, id);
   if (!existing) return err("見つかりません", 404);
   await env.DB.prepare("DELETE FROM memos WHERE item_id = ? AND user_id = ?").bind(id, user.id).run();
@@ -247,6 +252,7 @@ async function deleteItem(env, user, id) {
   for (const key of [existing.image_key, existing.spine_key, existing.side_key]) {
     await deleteImage(env, key);
   }
+  if (ctx) ctx.waitUntil(syncToNotion(env, user, existing, "delete"));
   return json({ ok: true });
 }
 
@@ -482,6 +488,199 @@ async function handleLookup(request) {
   return json({ results, code });
 }
 
+/* ---------- settings (Notion 連携設定) ---------- */
+/* データベースIDはハイフンを除去し、32桁 hex に正規化できればその形にする */
+function normalizeNotionDbId(raw) {
+  const s = String(raw || "").trim();
+  const hex = s.replace(/-/g, "").toLowerCase();
+  if (/^[0-9a-f]{32}$/.test(hex)) return hex;
+  return s;
+}
+
+/* 設定の読み取り。トークン自体は絶対に返さず、設定済みかどうかだけを返す */
+async function getUserSettings(env, user) {
+  const row = await env.DB.prepare("SELECT notion_token, notion_db_id, notion_enabled FROM users WHERE id = ?").bind(user.id).first();
+  return json({
+    notion_db_id: (row && row.notion_db_id) || "",
+    notion_enabled: !!((row && row.notion_enabled) || 0),
+    has_notion_token: !!String((row && row.notion_token) || "").trim(),
+  });
+}
+
+async function updateUserSettings(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  const sets = [];
+  const binds = [];
+  if (b.clear_notion_token === true) {
+    sets.push("notion_token = ''");
+  } else if (typeof b.notion_token === "string" && b.notion_token.trim()) {
+    /* 空文字のときは既存トークンを保持する（再入力された場合のみ差し替え） */
+    sets.push("notion_token = ?");
+    binds.push(b.notion_token.trim());
+  }
+  if (typeof b.notion_db_id === "string") {
+    sets.push("notion_db_id = ?");
+    binds.push(normalizeNotionDbId(b.notion_db_id));
+  }
+  if (typeof b.notion_enabled === "boolean") {
+    sets.push("notion_enabled = ?");
+    binds.push(b.notion_enabled ? 1 : 0);
+  }
+  if (sets.length) {
+    await env.DB.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).bind(...binds, user.id).run();
+  }
+  return getUserSettings(env, user);
+}
+
+/* ---------- Notion API ---------- */
+async function notionApi(token, method, path, body) {
+  /* ネットワークが応答しない場合にリクエストを吊るさないためのタイムアウト */
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(15000)
+    : undefined;
+  const res = await fetch(`https://api.notion.com/v1${path}`, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error(data.message || `Notion API error (${res.status})`);
+    e.code = data.code || "";
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
+/* 接続テスト: 保存済み（または body で渡された）token + db_id でデータベースを取得する */
+async function testNotion(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  const token = (typeof b.notion_token === "string" && b.notion_token.trim()) || String(user.notion_token || "").trim();
+  const dbId = normalizeNotionDbId((typeof b.notion_db_id === "string" && b.notion_db_id.trim()) || user.notion_db_id || "");
+  if (!token) return json({ ok: false, error: "インテグレーショントークンが設定されていません" });
+  if (!dbId) return json({ ok: false, error: "データベースIDが設定されていません" });
+  try {
+    const db = await notionApi(token, "GET", `/databases/${dbId}`);
+    const title = (db.title || []).map((t) => t.plain_text || "").join("");
+    return json({ ok: true, database_title: title });
+  } catch (e) {
+    return json({ ok: false, error: (e.code ? `${e.code}: ` : "") + (e.message || String(e)) });
+  }
+}
+
+/* === Notion プロパティマッピング（純粋関数。単体テスト対象） ===
+   DB の properties 定義とアイテムから、Notion ページ作成/更新用の
+   properties ペイロードを組み立てる。プロパティ名はエイリアス表で照合し、
+   値の形はプロパティの型に合わせる。マッチしないプロパティには触らない。 */
+const NOTION_TYPE_LABEL = { book: "書籍", cd: "CD", dvd: "DVD", other: "その他" };
+const NOTION_STATUS_LABEL = { unread: "未読", reading: "読み進め中", done: "読了" };
+const NOTION_FIELD_ALIASES = [
+  ["creator", ["作者", "著者", "クリエイター", "アーティスト"]],
+  ["publisher", ["出版社", "レーベル", "メーカー"]],
+  ["isbn", ["ISBN", "ISBN/バーコード"]],
+  ["catno", ["規格品番", "品番", "型番"]],
+  ["edition", ["版", "仕様", "エディション"]],
+  ["category", ["カテゴリー", "カテゴリ", "ジャンル"]],
+  ["location", ["保有場所", "場所", "ロケーション"]],
+  ["type", ["種別", "タイプ"]],
+  ["status", ["状態", "ステータス", "進捗状況"]],
+  ["price", ["価格", "定価"]],
+  ["created_at", ["登録日", "追加日"]],
+];
+
+function notionPropValue(propType, field, item) {
+  let text = "";
+  if (field === "type") text = NOTION_TYPE_LABEL[item.type] || "その他";
+  else if (field === "status") text = NOTION_STATUS_LABEL[item.status] || "未読";
+  else if (field !== "created_at") text = String(item[field] || "").trim();
+  switch (propType) {
+    case "title":
+      return text ? { title: [{ type: "text", text: { content: text.slice(0, 2000) } }] } : undefined;
+    case "rich_text":
+      return text ? { rich_text: [{ type: "text", text: { content: text.slice(0, 2000) } }] } : undefined;
+    case "select":
+      return text ? { select: { name: text.slice(0, 100) } } : undefined;
+    case "status":
+      return text ? { status: { name: text.slice(0, 100) } } : undefined;
+    case "multi_select":
+      return text ? { multi_select: [{ name: text.slice(0, 100) }] } : undefined;
+    case "url":
+      return text ? { url: text } : undefined;
+    case "number": {
+      if (field !== "price") return undefined;
+      const digits = String(item.price || "").replace(/[^\d.]/g, "");
+      if (!digits) return undefined; // 数字が無い価格は数値化できないので入れない
+      const num = Number(digits);
+      return Number.isFinite(num) ? { number: num } : undefined;
+    }
+    case "date": {
+      if (field !== "created_at" || !item.created_at) return undefined;
+      return { date: { start: new Date(item.created_at * 1000).toISOString().slice(0, 10) } };
+    }
+    default:
+      return undefined;
+  }
+}
+
+function buildNotionProperties(dbProps, item) {
+  const out = {};
+  const entries = Object.entries(dbProps || {});
+  /* title 型プロパティ（名前不問）にはアイテムのタイトルを入れる */
+  for (const [name, def] of entries) {
+    if (def && def.type === "title") {
+      out[name] = { title: [{ type: "text", text: { content: String(item.title || "").slice(0, 2000) } }] };
+    }
+  }
+  for (const [field, aliases] of NOTION_FIELD_ALIASES) {
+    const hit = entries.find(([name]) => aliases.some((a) => a.toLowerCase() === String(name).trim().toLowerCase()));
+    if (!hit) continue;
+    const [propName, def] = hit;
+    if (propName in out) continue;
+    const val = notionPropValue(def && def.type, field, item);
+    if (val !== undefined) out[propName] = val;
+  }
+  return out;
+}
+/* === /Notion プロパティマッピング === */
+
+/* アイテムの作成・更新・削除を Notion へ一方向同期する。
+   連携が無効・未設定なら何もしない。失敗しても呼び出し側（本体処理）は
+   絶対に止めないよう、ここで例外を握ってログに残す。 */
+async function syncToNotion(env, user, item, action) {
+  try {
+    if (!user || !item) return;
+    if (!user.notion_enabled) return;
+    const token = String(user.notion_token || "").trim();
+    const dbId = String(user.notion_db_id || "").trim();
+    if (!token || !dbId) return;
+    if (action === "delete") {
+      if (item.notion_page_id) {
+        await notionApi(token, "PATCH", `/pages/${item.notion_page_id}`, { archived: true });
+      }
+      return;
+    }
+    const db = await notionApi(token, "GET", `/databases/${dbId}`);
+    const properties = buildNotionProperties(db.properties || {}, item);
+    if (item.notion_page_id) {
+      await notionApi(token, "PATCH", `/pages/${item.notion_page_id}`, { properties });
+    } else {
+      const page = await notionApi(token, "POST", "/pages", { parent: { database_id: dbId }, properties });
+      if (page && page.id) {
+        await env.DB.prepare("UPDATE items SET notion_page_id = ? WHERE id = ? AND user_id = ?")
+          .bind(page.id, item.id, user.id).run();
+      }
+    }
+  } catch (e) {
+    console.error(`[notion-sync] action=${action} item=${item && item.id} failed:`, e && e.message ? e.message : e);
+  }
+}
+
 /* ---------- CSV export ---------- */
 function buildItemFilter(request) {
   const u = new URL(request.url);
@@ -549,7 +748,7 @@ async function exportCsv(request, env, user) {
 
 /* ---------- router ---------- */
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
     try {
@@ -561,12 +760,16 @@ export default {
       if (path.startsWith("/api/")) {
         const user = await currentUser(request, env);
         if (!user) return json({ error: "unauthorized" }, 401);
-        if (path === "/api/auth/me" && request.method === "GET") return json(user);
+        /* /api/auth/me は id と email のみ返す（Notion トークン等の設定値は出さない） */
+        if (path === "/api/auth/me" && request.method === "GET") return json({ id: user.id, email: user.email });
+        if (path === "/api/settings" && request.method === "GET") return getUserSettings(env, user);
+        if (path === "/api/settings" && request.method === "PUT") return updateUserSettings(request, env, user);
+        if (path === "/api/notion/test" && request.method === "POST") return testNotion(request, env, user);
         if (path === "/api/items/reorder" && request.method === "PUT") return reorderItems(request, env, user);
         if (path === "/api/labels" && request.method === "GET") return listLabels(env, user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
         if (path === "/api/export.csv" && request.method === "GET") return exportCsv(request, env, user);
-        if (path === "/api/items" && request.method === "POST") return createItem(request, env, user);
+        if (path === "/api/items" && request.method === "POST") return createItem(request, env, user, ctx);
         if (path === "/api/memos" && request.method === "GET") return listAllMemos(env, user);
         if (path === "/api/lookup" && request.method === "GET") return handleLookup(request);
         if (path === "/api/images" && request.method === "POST") return uploadImage(request, env, user);
@@ -575,8 +778,8 @@ export default {
         if ((m = path.match(/^\/api\/items\/(\d+)$/))) {
           const id = parseInt(m[1]);
           if (request.method === "GET") { const it = await getItem(env, user, id); return it ? json(it) : err("見つかりません", 404); }
-          if (request.method === "PUT") return updateItem(request, env, user, id);
-          if (request.method === "DELETE") return deleteItem(env, user, id);
+          if (request.method === "PUT") return updateItem(request, env, user, id, ctx);
+          if (request.method === "DELETE") return deleteItem(env, user, id, ctx);
         }
         if ((m = path.match(/^\/api\/items\/(\d+)\/memos$/))) {
           const id = parseInt(m[1]);

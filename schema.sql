@@ -4,6 +4,9 @@ CREATE TABLE IF NOT EXISTS users (
   pass_hash TEXT NOT NULL DEFAULT '',
   salt TEXT NOT NULL DEFAULT '',
   firebase_uid TEXT,
+  notion_token TEXT NOT NULL DEFAULT '',   -- Notion インテグレーショントークン（APIでは返さない）
+  notion_db_id TEXT NOT NULL DEFAULT '',   -- 連携先 Notion データベースID（32桁hex）
+  notion_enabled INTEGER NOT NULL DEFAULT 0, -- Notion 連携の有効/無効
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid);
@@ -32,6 +35,7 @@ CREATE TABLE IF NOT EXISTS items (
   spine_key TEXT DEFAULT '',           -- 背表紙の画像キー（KV）
   side_key TEXT DEFAULT '',            -- 横（側面）の画像キー（KV）
   sort_order INTEGER,                 -- 手動並び順（NULL は未設定）
+  notion_page_id TEXT NOT NULL DEFAULT '', -- 同期先 Notion ページID（未同期は空）
   status TEXT NOT NULL DEFAULT 'unread',   -- unread | reading | done
   prog_cur INTEGER DEFAULT 0,
   prog_total INTEGER DEFAULT 0,
