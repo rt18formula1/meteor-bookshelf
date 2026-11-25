@@ -70,12 +70,14 @@ export function coverSrc(item) {
   return "";
 }
 
-/* 棚に並べたときの見た目: 背表紙の写真 → 裏表紙の写真 → 表表紙の順で使う */
+/* 棚に並べたときの見た目: 背表紙の写真 → 表表紙 → 裏表紙の写真の順で使う */
 export function spineSrc(item) {
   if (!item) return "";
   if (item.spine_key) return `/api/images/${encodeURIComponent(item.spine_key)}`;
+  const cover = coverSrc(item);
+  if (cover) return cover;
   if (item.side_key) return `/api/images/${encodeURIComponent(item.side_key)}`;
-  return coverSrc(item);
+  return "";
 }
 
 /* 価格の表示整形: 数値だけなら ¥1,650 形式、それ以外はそのまま */

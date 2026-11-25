@@ -254,7 +254,7 @@ export default function ItemDetailModal() {
 
           <div className="divider" />
           <h3>画像</h3>
-          <p className="muted small">表表紙・背表紙・裏表紙の写真は任意登録です。棚では背表紙→裏表紙→表表紙の順に使われます。未登録の場合は取得した表紙情報がそのまま使われます。</p>
+          <p className="muted small">表表紙・背表紙・裏表紙の写真は任意登録です。棚では背表紙→表表紙→裏表紙の順に使われます。未登録の場合は取得した表紙情報がそのまま使われます。</p>
           <div className="slot-grid">
             {[
               { field: "image_key", label: "表表紙", keyVal: item.image_key },

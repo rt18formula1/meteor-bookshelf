@@ -55,43 +55,163 @@ const MAX_SRC_EDGE = 3000; // 作業用キャンバスの長辺上限
 const MAX_OUT_EDGE = 2000; // 補正後画像の長辺上限（従来は 600x848 固定で粗くなっていた）
 const WARP_GRID = 56; // 三角形分割の細かさ（従来 24 で継ぎ目が目立った）
 
-/* 写真ファイルの EXIF 向きを画素に焼き込んだ作業用キャンバスを作る。
-   <img> の naturalWidth/Height はブラウザ（特に iOS Safari）で EXIF 回転と
-   ずれることがあり、座標計算が狂って向きがバグるため、createImageBitmap の
-   imageOrientation: 'from-image' で正規化してから扱う。 */
-async function fileToCanvas(file) {
-  let bmp = null;
-  try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); }
-  catch (_) {
-    try { bmp = await createImageBitmap(file); } catch (_) { bmp = null; }
-  }
-  let w, h, drawable;
-  if (bmp) {
-    w = bmp.width; h = bmp.height; drawable = bmp;
-  } else {
-    const url = URL.createObjectURL(file);
-    try {
-      const img = await new Promise((res, rej) => {
-        const i = new Image();
-        i.onload = () => res(i);
-        i.onerror = rej;
-        i.src = url;
-      });
-      w = img.naturalWidth; h = img.naturalHeight; drawable = img;
-    } finally {
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+/* JPEG のバイト列から、保存画素サイズ（SOF）と EXIF の向き（Orientation）を
+   自分で読み取る。ブラウザの申告（naturalWidth 等）に頼らないための実測値。 */
+async function parseJpegInfo(file) {
+  try {
+    const buf = await file.arrayBuffer();
+    const v = new DataView(buf);
+    if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return null;
+    let rawW = 0, rawH = 0, orientation = 1;
+    let off = 2;
+    while (off + 4 <= v.byteLength) {
+      if (v.getUint8(off) !== 0xff) break;
+      const marker = v.getUint8(off + 1);
+      if (marker === 0xda) break; // SOS: ここから先は画像データ
+      const len = v.getUint16(off + 2);
+      if (len < 2) break;
+      if (marker === 0xe1 && off + 10 <= v.byteLength &&
+          v.getUint32(off + 4) === 0x45786966 && v.getUint16(off + 8) === 0) {
+        // APP1 "Exif\0\0": TIFF ヘッダをたどって Orientation (0x0112) を読む
+        const t = off + 10;
+        const le = v.getUint16(t) === 0x4949;
+        const get16 = (o) => v.getUint16(o, le);
+        const get32 = (o) => v.getUint32(o, le);
+        const ifd = t + get32(t + 4);
+        const count = get16(ifd);
+        for (let i = 0; i < count; i++) {
+          const e = ifd + 2 + i * 12;
+          if (get16(e) === 0x0112) { orientation = get16(e + 8) || 1; break; }
+        }
+      }
+      if ((marker === 0xc0 || marker === 0xc2) && off + 9 <= v.byteLength) {
+        rawH = v.getUint16(off + 5);
+        rawW = v.getUint16(off + 7);
+      }
+      if (rawW && orientation) { /* 両方取れても EXIF が後ろにある場合に備え走査は続ける */ }
+      off += 2 + len;
+      if (rawW && off > 2 && marker === 0xc0) break;
     }
+    return rawW ? { rawW, rawH, orientation } : null;
+  } catch (_) {
+    return null;
   }
-  const scale = Math.min(1, MAX_SRC_EDGE / Math.max(w, h));
-  const cw = Math.max(1, Math.round(w * scale));
-  const ch = Math.max(1, Math.round(h * scale));
+}
+
+/* 向きが未適用の画素（drawable: rawW x rawH）に EXIF の向きを手動で適用する */
+function orientCanvas(drawable, rawW, rawH, orientation) {
+  const swap = orientation >= 5 && orientation <= 8;
   const c = document.createElement("canvas");
-  c.width = cw; c.height = ch;
+  c.width = swap ? rawH : rawW;
+  c.height = swap ? rawW : rawH;
   const ctx = c.getContext("2d");
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(drawable, 0, 0, cw, ch);
-  if (bmp && bmp.close) bmp.close();
+  switch (orientation) {
+    case 2: ctx.transform(-1, 0, 0, 1, rawW, 0); break;
+    case 3: ctx.transform(-1, 0, 0, -1, rawW, rawH); break;
+    case 4: ctx.transform(1, 0, 0, -1, 0, rawH); break;
+    case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
+    case 6: ctx.transform(0, 1, -1, 0, rawH, 0); break;
+    case 7: ctx.transform(0, -1, -1, 0, rawH, rawW); break;
+    case 8: ctx.transform(0, -1, 1, 0, 0, rawW); break;
+    default: break;
+  }
+  ctx.drawImage(drawable, 0, 0);
+  return c;
+}
+
+function downscaleCanvas(src, maxEdge) {
+  const scale = Math.min(1, maxEdge / Math.max(src.width, src.height));
+  if (scale >= 1) return src;
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(src.width * scale));
+  c.height = Math.max(1, Math.round(src.height * scale));
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+
+/* 写真ファイルの EXIF 向きを画素に焼き込んだ作業用キャンバスを作る。
+   iOS Safari は createImageBitmap の imageOrientation オプションを無視する
+   ことがあり、前回の方式では向きが適用されなかった。そこで:
+   - オプションが効くブラウザでは 'from-image' の結果をそのまま使う
+   - 効かない場合は、JPEG から自力で読んだ向きと保存画素サイズを使い、
+     未回転の画素に回転を手動で適用する（寸法の食い違いで判定する） */
+async function fileToCanvas(file) {
+  const info = await parseJpegInfo(file);
+  let bmpFrom = null, bmpNone = null;
+  try { bmpFrom = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch (_) {}
+  try { bmpNone = await createImageBitmap(file, { imageOrientation: "none" }); } catch (_) {}
+  let oriented = null;
+  if (bmpFrom && bmpNone && (bmpFrom.width !== bmpNone.width || bmpFrom.height !== bmpNone.height)) {
+    oriented = bmpFrom; // オプションが効いている: 向き適用済み
+  } else {
+    const bmp = bmpFrom || bmpNone;
+    if (bmp && info && info.orientation !== 1 &&
+        bmp.width === info.rawW && bmp.height === info.rawH) {
+      oriented = orientCanvas(bmp, info.rawW, info.rawH, info.orientation); // 未回転の画素に手動適用
+    } else if (bmp) {
+      oriented = bmp; // すでにブラウザ側で向きが適用されている
+    }
+  }
+  if (oriented) {
+    // 必ず実キャンバスへ描き直してから bitmap を閉じる（閉じた bitmap を返すと描画できない）
+    const scale = Math.min(1, MAX_SRC_EDGE / Math.max(oriented.width, oriented.height));
+    const result = document.createElement("canvas");
+    result.width = Math.max(1, Math.round(oriented.width * scale));
+    result.height = Math.max(1, Math.round(oriented.height * scale));
+    const rctx = result.getContext("2d");
+    rctx.imageSmoothingEnabled = true;
+    rctx.imageSmoothingQuality = "high";
+    rctx.drawImage(oriented, 0, 0, result.width, result.height);
+    if (bmpFrom && bmpFrom.close) bmpFrom.close();
+    if (bmpNone && bmpNone.close) bmpNone.close();
+    return result;
+  }
+  // createImageBitmap が使えない環境: <img> の描画（ブラウザが EXIF を適用）に任せ、
+  // 寸法だけは JPEG の実測値と向きから決める
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    let w = img.naturalWidth, h = img.naturalHeight;
+    if (info && info.rawW) {
+      const swap = info.orientation >= 5 && info.orientation <= 8;
+      w = swap ? info.rawH : info.rawW;
+      h = swap ? info.rawW : info.rawH;
+    }
+    const scale = Math.min(1, MAX_SRC_EDGE / Math.max(w, h));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    return c;
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+}
+
+/* 作業用キャンバスを 90 度回転させる（dir: 1=右回転, -1=左回転） */
+function rotateCanvas90(src, dir) {
+  const c = document.createElement("canvas");
+  c.width = src.height;
+  c.height = src.width;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  if (dir === 1) ctx.transform(0, 1, -1, 0, src.height, 0);
+  else ctx.transform(0, -1, 1, 0, 0, src.width);
+  ctx.drawImage(src, 0, 0);
   return c;
 }
 
@@ -111,10 +231,20 @@ export default function CoverEditorModal() {
 
   const file = coverEditor && coverEditor.file;
   const label = (coverEditor && coverEditor.label) || "表紙";
+  const dispUrlRef = useRef("");
+
+  const showCanvas = useCallback(async (canvas) => {
+    const blob = await canvasToBlob(canvas);
+    if (!blob) return;
+    if (dispUrlRef.current) URL.revokeObjectURL(dispUrlRef.current);
+    const url = URL.createObjectURL(blob);
+    dispUrlRef.current = url;
+    setCorners(null);
+    setImgUrl(url);
+  }, []);
 
   useEffect(() => {
     if (!file) return;
-    let url = "";
     let cancelled = false;
     setCorners(null);
     setImgUrl("");
@@ -123,17 +253,26 @@ export default function CoverEditorModal() {
         const canvas = await fileToCanvas(file);
         if (cancelled) return;
         srcRef.current = canvas;
-        const blob = await canvasToBlob(canvas);
-        if (cancelled || !blob) return;
-        url = URL.createObjectURL(blob);
-        setImgUrl(url);
+        await showCanvas(canvas);
       } catch (_) {
         if (!cancelled) toast("画像の読み込みに失敗しました");
       }
     })();
-    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+    return () => {
+      cancelled = true;
+      if (dispUrlRef.current) { URL.revokeObjectURL(dispUrlRef.current); dispUrlRef.current = ""; }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
+
+  /* 向きを 90 度ずつ回す（自動で合わない場合の手動調整） */
+  const rotate = async (dir) => {
+    const src = srcRef.current;
+    if (!src || busy) return;
+    const rotated = rotateCanvas90(src, dir);
+    srcRef.current = rotated;
+    await showCanvas(rotated);
+  };
 
   const handleImgLoad = () => {
     const img = imgRef.current;
@@ -233,7 +372,11 @@ export default function CoverEditorModal() {
   return (
     <Modal onClose={closeCoverEditor}>
       <h2 id="cover-modal-title">{label}の切り抜き（台形補正）</h2>
-      <p className="muted small">{label}の四隅に丸ハンドルを合わせてください。斜めに写った写真をまっすぐに補正して切り抜きます。</p>
+      <p className="muted small">{label}の四隅に丸ハンドルを合わせてください。斜めに写った写真をまっすぐに補正して切り抜きます。向きが合わない場合は回転ボタンで調整できます。</p>
+      <div className="row-gap" style={{ marginBottom: 8 }}>
+        <button type="button" className="btn-secondary btn-small" onClick={() => rotate(-1)} disabled={busy || !imgUrl}>↺ 左に回転</button>
+        <button type="button" className="btn-secondary btn-small" onClick={() => rotate(1)} disabled={busy || !imgUrl}>↻ 右に回転</button>
+      </div>
       <div className="cover-editor" ref={editorRef}>
         {imgUrl && <img ref={imgRef} src={imgUrl} alt={`${label}写真`} onLoad={handleImgLoad} draggable={false} />}
         {corners && (
