@@ -75,3 +75,29 @@ export async function downloadCsv(params = {}) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
+
+/* Excel (.xlsx) でダウンロードする。表データは /api/export.json から取得し、
+   SheetJS でブックを組み立てる（ライブラリは動的 import で遅延読み込み）。 */
+export async function downloadXlsx(params = {}) {
+  const clean = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== "" && v != null) clean[k] = v;
+  }
+  const qs = new URLSearchParams(clean);
+  const headers = await authHeaders();
+  const res = await fetch(`/api/export.json?${qs}`, { headers });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error(d.error || `エラー (${res.status})`);
+  }
+  const data = await res.json();
+  const XLSX = await import("xlsx");
+  const ws = XLSX.utils.aoa_to_sheet([data.header, ...(data.rows || [])]);
+  ws["!cols"] = (data.header || []).map((_, i) => ({ wch: i === 2 ? 36 : 15 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "蔵書");
+  const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  const stamp = `${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}-${p(now.getUTCHours())}${p(now.getUTCMinutes())}`;
+  XLSX.writeFile(wb, `bookshelf-${stamp}.xlsx`);
+}

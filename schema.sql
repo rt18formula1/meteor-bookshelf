@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
   notion_token TEXT NOT NULL DEFAULT '',   -- Notion インテグレーショントークン（APIでは返さない）
   notion_db_id TEXT NOT NULL DEFAULT '',   -- 連携先 Notion データベースID（32桁hex）
   notion_enabled INTEGER NOT NULL DEFAULT 0, -- Notion 連携の有効/無効
+  sheets_id TEXT NOT NULL DEFAULT '',      -- Google Sheets 書き出し先スプレッドシートID
+  sheets_url TEXT NOT NULL DEFAULT '',     -- 同 URL
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid);

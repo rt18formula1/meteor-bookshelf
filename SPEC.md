@@ -104,3 +104,43 @@
 - Notion連携は、ユーザーが自分のトークンとDB IDを設定した状態で、アイテムの作成・更新・削除が Notion 側に反映されること（実トークンでの最終確認はユーザーの設定後に行う）
 - Cloudflareへデプロイし、公開URLを報告する
 - Cloudflareの認証等でブロックされた場合は、できるところまで進めて報告する
+
+## 有料化計画（外部エクスポート / アクティベーションコード方式）— 2026-11-25 計画策定・未実装
+
+方針: 基本機能はすべて無料。**外部へのエクスポートだけを有料機能**とし、買い切りのアクティベーションコードで解放する。実装は本計画に沿って行う（塚本様の開始指示があるまで実装しない）。
+
+### 有料対象（export_unlocked が必要）
+- CSV ダウンロード（GET /api/export.csv）
+- Excel（.xlsx）ダウンロード（GET /api/export.json 経由の生成を含む）
+- Google スプレッドシート書き出し（POST /api/sheets/export）
+- Notion 連携の実行（自動同期 syncToNotion、一括同期 POST /api/notion/sync-all、設定での notion_enabled の有効化）
+- 例外: Notion の接続テスト（POST /api/notion/test）は無料で可とする（購入前に接続可否を確認できるようにするため）
+
+### 無料のまま
+アイテムの登録・編集・削除、棚/リスト表示、検索・絞り込み、バーコード/ISBN/品番検索、書誌情報の自動取得、画像3面登録、台形補正、メモ、並び替え、CSV 以外の全機能。
+
+### アクティベーションコード設計
+- 形式: `MBSH-XXXXXX-XXXXXX-XXXXXX`（推測困難なランダム英数字。正規化はハイフン除去＋大文字化）
+- 保存: 平文は保存しない。SHA-256 ハッシュのみを D1 に保存し、平文は発行時に一度だけ表示する
+- テーブル `license_codes`: id / code_hash（UNIQUE）/ feature（当面 'export' 固定）/ note（発行先メモ）/ created_at / redeemed_by（users.id、NULL=未使用）/ redeemed_at / revoked（0/1）
+- users に `export_unlocked INTEGER NOT NULL DEFAULT 0` を追加
+- 発行: 管理用スクリプト `scripts/gen-license-codes.mjs --count N --note "..."` が平文コードを標準出力し、ハッシュを本番 D1 へ INSERT する
+- 償還: `POST /api/license/redeem { code }` → ハッシュ照合し、未使用・未失効なら redeemed_by に自分を設定し users.export_unlocked=1 にする。1コード=1アカウント。エラー文は「コードが無効です」に統一し詳細を漏らさない
+- 設定取得（GET /api/settings）に export_unlocked を含める
+- ゲート: 上記の有料対象エンドポイントと自動同期の実行条件に export_unlocked を追加。未解放時は 403 `{ error: "有料機能です", code: "license_required" }`
+- UI: 設定画面に「エクスポート機能の有効化」カード（コード入力＋有効化ボタン＋解放状態の表示）。未解放時は各エクスポートボタンと Notion カードに「有料」バッジと案内を表示する
+- 塚本様ご自身のアカウントは管理側で export_unlocked=1 に設定しておく
+
+### 未決事項（実装前に決める）
+- 価格（買い切り想定。金額未定）
+- 販売チャネル（BOOTH でコードを販売する想定だが未確定）
+- コードの有効期限の有無、返金・再発行ポリシー
+- 償還の試行回数制限（ブルートフォース対策を入れるか）
+
+### 実装手順
+1. D1 マイグレーション（license_codes 作成、users.export_unlocked 追加）
+2. 発行スクリプト scripts/gen-license-codes.mjs
+3. POST /api/license/redeem と GET /api/settings への export_unlocked 追加
+4. 有料対象エンドポイント＋自動同期へのゲート適用
+5. 設定画面の有効化カードと「有料」バッジ表示
+6. 検証: 未解放で 403 / 正規コードで解放 / 使用済みコードの再利用不可 / 失効コード不可

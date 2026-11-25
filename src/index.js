@@ -103,7 +103,7 @@ async function currentUser(request, env) {
   const uid = payload.sub;
   const email = String(payload.email).toLowerCase();
   /* Notion 連携設定も含めて返す（内部利用のみ。API レスポンスに出す場合は呼び出し側で絞ること） */
-  const cols = "id, email, notion_token, notion_db_id, notion_enabled";
+  const cols = "id, email, notion_token, notion_db_id, notion_enabled, sheets_id, sheets_url";
   let user = await env.DB.prepare(`SELECT ${cols} FROM users WHERE firebase_uid = ?`).bind(uid).first();
   if (user) return user;
   user = await env.DB.prepare(`SELECT ${cols} FROM users WHERE email = ?`).bind(email).first();
@@ -114,7 +114,7 @@ async function currentUser(request, env) {
   const res = await env.DB.prepare(
     "INSERT INTO users (email, pass_hash, salt, firebase_uid, created_at) VALUES (?, '', '', ?, ?)"
   ).bind(email, uid, Math.floor(Date.now() / 1000)).run();
-  return { id: res.meta.last_row_id, email, notion_token: "", notion_db_id: "", notion_enabled: 0 };
+  return { id: res.meta.last_row_id, email, notion_token: "", notion_db_id: "", notion_enabled: 0, sheets_id: "", sheets_url: "" };
 }
 
 /* ---------- items ---------- */
@@ -499,11 +499,12 @@ function normalizeNotionDbId(raw) {
 
 /* 設定の読み取り。トークン自体は絶対に返さず、設定済みかどうかだけを返す */
 async function getUserSettings(env, user) {
-  const row = await env.DB.prepare("SELECT notion_token, notion_db_id, notion_enabled FROM users WHERE id = ?").bind(user.id).first();
+  const row = await env.DB.prepare("SELECT notion_token, notion_db_id, notion_enabled, sheets_url FROM users WHERE id = ?").bind(user.id).first();
   return json({
     notion_db_id: (row && row.notion_db_id) || "",
     notion_enabled: !!((row && row.notion_enabled) || 0),
     has_notion_token: !!String((row && row.notion_token) || "").trim(),
+    sheets_url: (row && row.sheets_url) || "",
   });
 }
 
@@ -798,8 +799,10 @@ function fmtJST(ts) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
-async function exportCsv(request, env, user) {
-  const { where, binds } = buildItemFilter(request);
+/* エクスポート共通の表データ（CSV / JSON(xlsx生成用) / Google Sheets で共用）。
+   request があれば絞り込みを適用、なければ全件。 */
+async function buildExportTable(env, user, request) {
+  const { where, binds } = request ? buildItemFilter(request) : { where: "WHERE user_id = ?", binds: [] };
   const rows = await env.DB.prepare(
     `SELECT ${ITEM_COLS}, (SELECT COUNT(*) FROM memos m WHERE m.item_id = items.id) AS memo_count
      FROM items ${where} ORDER BY created_at DESC, id DESC LIMIT 5000`
@@ -816,15 +819,21 @@ async function exportCsv(request, env, user) {
     memoMap.get(m.item_id).push(m.body);
   }
   const header = ["ID", "種別", "タイトル", "著者/アーティスト", "出版社/レーベル", "ISBN/バーコード", "規格品番", "版・仕様", "価格", "保有場所", "カテゴリー", "状態", "進捗（現在）", "進捗（全体）", "進捗率", "メモ件数", "メモ", "表紙URL", "登録日時", "更新日時"];
-  const lines = [header.map(csvCell).join(",")];
+  const table = [header];
   for (const it of items) {
     const pct = it.prog_total > 0 ? Math.min(100, Math.round((it.prog_cur / it.prog_total) * 100)) + "%" : "";
-    lines.push([
+    table.push([
       it.id, it.type, it.title, it.creator || "", it.publisher || "", it.isbn || "", it.catno || "", it.edition || "", it.price || "", it.location || "", it.category || "", it.status,
       it.prog_cur || 0, it.prog_total || 0, pct, it.memo_count || 0,
       (memoMap.get(it.id) || []).join("\n"), it.cover_url || "", fmtJST(it.created_at), fmtJST(it.updated_at),
-    ].map(csvCell).join(","));
+    ]);
   }
+  return table;
+}
+
+async function exportCsv(request, env, user) {
+  const table = await buildExportTable(env, user, request);
+  const lines = table.map((row) => row.map(csvCell).join(","));
   const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
   const stamp = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}${String(now.getUTCDate()).padStart(2, "0")}-${String(now.getUTCHours()).padStart(2, "0")}${String(now.getUTCMinutes()).padStart(2, "0")}`;
   return new Response("\uFEFF" + lines.join("\r\n") + "\r\n", {
@@ -834,6 +843,73 @@ async function exportCsv(request, env, user) {
       "Cache-Control": "no-store",
     },
   });
+}
+
+/* xlsx 生成用に表データを JSON で返す（フロントで SheetJS により .xlsx 化する） */
+async function exportJson(request, env, user) {
+  const table = await buildExportTable(env, user, request);
+  return json({ header: table[0], rows: table.slice(1) });
+}
+
+/* ---------- Google Sheets 書き出し ---------- */
+async function sheetsApi(accessToken, method, url, body) {
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(20000)
+    : undefined;
+  const res = await fetch(url, {
+    method,
+    headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error((data.error && data.error.message) || `Google Sheets API error (${res.status})`);
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
+/* 全アイテムを Google スプレッドシートへ書き出す（手動実行）。
+   アクセストークンはフロントが Google 承認ポップアップで取得したものを
+   その場限りで受け取り、保存はしない。シートは初回に作成し、次回からは
+   同じシートを丸ごと書き換える。 */
+async function exportToSheets(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  const accessToken = String(b.access_token || "").trim();
+  if (!accessToken) return json({ ok: false, error: "Google のアクセストークンがありません" });
+  try {
+    const table = await buildExportTable(env, user, null);
+    let spreadsheetId = String(user.sheets_id || "").trim();
+    let spreadsheetUrl = String(user.sheets_url || "").trim();
+    if (spreadsheetId) {
+      try {
+        await sheetsApi(accessToken, "GET", `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId`);
+      } catch (e) {
+        if (e.status === 404) spreadsheetId = "";
+        else throw e;
+      }
+    }
+    if (!spreadsheetId) {
+      const created = await sheetsApi(accessToken, "POST", "https://sheets.googleapis.com/v4/spreadsheets", {
+        properties: { title: "私の本棚｜蔵書リスト" },
+        sheets: [{ properties: { title: "蔵書" } }],
+      });
+      spreadsheetId = created.spreadsheetId;
+      spreadsheetUrl = created.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+      await env.DB.prepare("UPDATE users SET sheets_id = ?, sheets_url = ? WHERE id = ?")
+        .bind(spreadsheetId, spreadsheetUrl, user.id).run();
+    }
+    await sheetsApi(accessToken, "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent("蔵書!A1:Z5000")}:clear`, {});
+    await sheetsApi(accessToken, "PUT",
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent("蔵書!A1")}?valueInputOption=RAW`,
+      { range: "蔵書!A1", majorDimension: "ROWS", values: table });
+    return json({ ok: true, url: spreadsheetUrl, count: table.length - 1 });
+  } catch (e) {
+    return json({ ok: false, error: e.message || String(e) });
+  }
 }
 
 /* ---------- router ---------- */
@@ -860,6 +936,8 @@ export default {
         if (path === "/api/labels" && request.method === "GET") return listLabels(env, user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
         if (path === "/api/export.csv" && request.method === "GET") return exportCsv(request, env, user);
+        if (path === "/api/export.json" && request.method === "GET") return exportJson(request, env, user);
+        if (path === "/api/sheets/export" && request.method === "POST") return exportToSheets(request, env, user);
         if (path === "/api/items" && request.method === "POST") return createItem(request, env, user, ctx);
         if (path === "/api/memos" && request.method === "GET") return listAllMemos(env, user);
         if (path === "/api/lookup" && request.method === "GET") return handleLookup(request);

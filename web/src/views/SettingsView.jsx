@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { signOut } from "firebase/auth";
+import { signOut, GoogleAuthProvider, reauthenticateWithPopup, linkWithPopup } from "firebase/auth";
 import { auth } from "../firebase.js";
-import { api, apiJson, downloadCsv } from "../api.js";
+import { api, apiJson, downloadCsv, downloadXlsx } from "../api.js";
 import { useApp } from "../store.jsx";
 import { IconDownload } from "../components/Icons.jsx";
 
@@ -241,6 +241,67 @@ export default function SettingsView() {
     }
   };
 
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const exportXlsx = async () => {
+    setXlsxBusy(true);
+    try {
+      await downloadXlsx({});
+      toast("Excelファイルをダウンロードしました");
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setXlsxBusy(false);
+    }
+  };
+
+  const [sheetsBusy, setSheetsBusy] = useState(false);
+  const [sheetsResult, setSheetsResult] = useState(null); // { ok, message, url }
+  const [sheetsUrl, setSheetsUrl] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api("/api/settings");
+        if (!cancelled && s.sheets_url) setSheetsUrl(s.sheets_url);
+      } catch (_) {}
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  /* Google 承認ポップアップで Sheets 用のアクセストークンを取得し、
+     サーバー経由でスプレッドシートへ全件書き出す。トークンは保存しない。 */
+  const exportSheets = async () => {
+    setSheetsBusy(true);
+    setSheetsResult(null);
+    try {
+      const cu = auth.currentUser;
+      if (!cu) throw new Error("ログイン状態を確認できませんでした");
+      const provider = new GoogleAuthProvider();
+      provider.addScope("https://www.googleapis.com/auth/spreadsheets");
+      provider.addScope("https://www.googleapis.com/auth/drive.file");
+      const isGoogle = cu.providerData.some((p) => p.providerId === "google.com");
+      const result = isGoogle ? await reauthenticateWithPopup(cu, provider) : await linkWithPopup(cu, provider);
+      const cred = GoogleAuthProvider.credentialFromResult(result);
+      if (!cred || !cred.accessToken) throw new Error("Google の承認が取得できませんでした");
+      const r = await apiJson("/api/sheets/export", "POST", { access_token: cred.accessToken });
+      if (r.ok) {
+        setSheetsUrl(r.url || "");
+        setSheetsResult({ ok: true, message: `${r.count} 件を Google スプレッドシートへ書き出しました`, url: r.url || "" });
+      } else {
+        setSheetsResult({ ok: false, message: r.error || "不明なエラー" });
+      }
+    } catch (e) {
+      let msg = e.message || String(e);
+      if (e.code === "auth/popup-closed-by-user") msg = "Google の承認がキャンセルされました";
+      else if (e.code === "auth/popup-blocked") msg = "ポップアップがブロックされました。ブラウザのポップアップ許可をご確認ください";
+      else if (e.code === "auth/credential-already-in-use" || e.code === "auth/email-already-in-use") msg = "この Google アカウントは別のユーザーに紐付いています。Google ログインでお使いのアカウントでお試しください";
+      setSheetsResult({ ok: false, message: msg });
+    } finally {
+      setSheetsBusy(false);
+    }
+  };
+
   return (
     <section className="view">
       <h2 className="view-title">設定</h2>
@@ -276,10 +337,28 @@ export default function SettingsView() {
       <NotionCard />
       <div className="card">
         <h3>データのエクスポート</h3>
-        <p className="muted small">自分の棚の全アイテムをCSVでダウンロードできます。Excelで日本語が文字化けしない形式です。</p>
-        <button className="btn-secondary" onClick={exportAll}>
-          <IconDownload size={16} /> CSVでダウンロード
-        </button>
+        <p className="muted small">自分の棚の全アイテムを、CSV / Excel ファイルでダウンロードしたり、Google スプレッドシートへ書き出したりできます。</p>
+        <div className="row-gap wrap">
+          <button className="btn-secondary" onClick={exportAll}>
+            <IconDownload size={16} /> CSVでダウンロード
+          </button>
+          <button className="btn-secondary" onClick={exportXlsx} disabled={xlsxBusy}>
+            <IconDownload size={16} /> {xlsxBusy ? "Excelを作成中…" : "Excel（.xlsx）でダウンロード"}
+          </button>
+          <button className="btn-secondary" onClick={exportSheets} disabled={sheetsBusy}>
+            {sheetsBusy ? "書き出し中…" : "Google スプレッドシートへ書き出す"}
+          </button>
+        </div>
+        <p className="muted small" style={{ marginTop: 8 }}>
+          スプレッドシートへ書き出す際は Google の承認画面が開きます。初回は新しいシートを作成し、次回からは同じシートを最新の一覧で書き換えます。
+          {sheetsUrl && (<> <a href={sheetsUrl} target="_blank" rel="noreferrer">前回のシートを開く</a></>)}
+        </p>
+        {sheetsResult && (
+          <p className="small" style={{ color: sheetsResult.ok ? "#2e6b2e" : "#b03030" }}>
+            {sheetsResult.message}
+            {sheetsResult.ok && sheetsResult.url && (<> <a href={sheetsResult.url} target="_blank" rel="noreferrer">シートを開く</a></>)}
+          </p>
+        )}
       </div>
       <div className="card">
         <h3>このアプリについて</h3>
