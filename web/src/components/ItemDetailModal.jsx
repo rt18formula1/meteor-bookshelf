@@ -131,7 +131,7 @@ export default function ItemDetailModal() {
     });
   };
 
-  /* 画像スロット（表表紙=image_key／背表紙=spine_key／横=side_key）の差し替え・削除 */
+  /* 画像スロット（表表紙=image_key／背表紙=spine_key／裏表紙=side_key）の差し替え・削除 */
   const putItemKey = async (field, key, msg) => {
     if (!item || slotBusy) return;
     setSlotBusy(true);
@@ -247,12 +247,12 @@ export default function ItemDetailModal() {
 
           <div className="divider" />
           <h3>画像</h3>
-          <p className="muted small">表表紙・背表紙・横（側面）の写真は任意登録です。棚では背表紙→横→表表紙の順に使われます。未登録の場合は取得した表紙情報がそのまま使われます。</p>
+          <p className="muted small">表表紙・背表紙・裏表紙の写真は任意登録です。棚では背表紙→裏表紙→表表紙の順に使われます。未登録の場合は取得した表紙情報がそのまま使われます。</p>
           <div className="slot-grid">
             {[
               { field: "image_key", label: "表表紙", keyVal: item.image_key },
               { field: "spine_key", label: "背表紙", keyVal: item.spine_key },
-              { field: "side_key", label: "横", keyVal: item.side_key },
+              { field: "side_key", label: "裏表紙", keyVal: item.side_key },
             ].map((s) => (
               <div className="slot" key={s.field}>
                 <div className="slot-label">{s.label}</div>

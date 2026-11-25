@@ -70,7 +70,7 @@ export function coverSrc(item) {
   return "";
 }
 
-/* 棚に並べたときの見た目: 背表紙の写真 → 横（側面）の写真 → 表表紙の順で使う */
+/* 棚に並べたときの見た目: 背表紙の写真 → 裏表紙の写真 → 表表紙の順で使う */
 export function spineSrc(item) {
   if (!item) return "";
   if (item.spine_key) return `/api/images/${encodeURIComponent(item.spine_key)}`;
