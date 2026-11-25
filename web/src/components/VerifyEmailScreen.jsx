@@ -1,6 +1,7 @@
-import React, { useState } from "react";
-import { sendEmailVerification, signOut } from "firebase/auth";
+import React, { useEffect, useState } from "react";
+import { signOut } from "firebase/auth";
 import { auth } from "../firebase.js";
+import { sendVerificationEmail, getVerificationEmailStatus } from "../verifyEmail.js";
 import { useApp } from "../store.jsx";
 import { IconBookLogo } from "./Icons.jsx";
 
@@ -12,20 +13,57 @@ export default function VerifyEmailScreen() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resendWaitSec, setResendWaitSec] = useState(0);
+  const [dailyLimitReached, setDailyLimitReached] = useState(false);
+
+  /* 再送の可否（60秒の間隔・1日5回の上限）を1秒ごとに更新する。
+     ログイン時の自動送信で直前に送られた場合は、再送までの待ち時間を表示する */
+  useEffect(() => {
+    const update = () => {
+      const st = getVerificationEmailStatus();
+      setResendWaitSec(Math.ceil(st.resendWaitMs / 1000));
+      setDailyLimitReached(st.dailyLimitReached);
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  /* ログイン時の自動送信で直前にメールが送られている場合は、その旨を表示する */
+  useEffect(() => {
+    const st = getVerificationEmailStatus();
+    if (st.lastSentAt && Date.now() - st.lastSentAt < 10 * 60 * 1000) {
+      setNotice("確認メールを送信しました。メール内のリンクを開いて認証を完了してください。");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const resend = async () => {
     setNotice("");
     setError("");
+    const st = getVerificationEmailStatus();
+    if (st.dailyLimitReached) {
+      setError("本日の送信回数の上限に達しました。明日以降にお試しください。");
+      return;
+    }
+    if (!st.canResend) {
+      setError(`再送はあと${Math.ceil(st.resendWaitMs / 1000)}秒お待ちください。`);
+      return;
+    }
     setBusy(true);
     try {
       const u = auth.currentUser;
       if (!u) throw new Error("not-signed-in");
-      await sendEmailVerification(u);
+      await sendVerificationEmail(u);
       setNotice("確認メールを送信しました。メール内のリンクを開いて認証を完了してください。");
     } catch (e) {
-      setError(e && e.code === "auth/too-many-requests"
-        ? "送信回数が多すぎます。しばらく待ってから再度お試しください。"
-        : "確認メールの送信に失敗しました。しばらく待ってから再度お試しください。");
+      if (e && e.code === "auth/too-many-requests") {
+        setError("送信回数が多すぎます。しばらく待ってから再度お試しください。");
+      } else if (e && e.code === "auth/requires-recent-login") {
+        setError("ログインし直してから、もう一度お試しください。");
+      } else {
+        setError("確認メールの送信に失敗しました。しばらく待ってから再度お試しください。");
+      }
     }
     setBusy(false);
   };
@@ -78,8 +116,12 @@ export default function VerifyEmailScreen() {
             {busy ? "確認中…" : "認証が完了したらこちらを押す"}
           </button>
           <div style={{ height: 10 }} />
-          <button type="button" className="btn-secondary btn-block" onClick={resend} disabled={busy}>
-            確認メールを再送信する
+          <button type="button" className="btn-secondary btn-block" onClick={resend} disabled={busy || dailyLimitReached || resendWaitSec > 0}>
+            {dailyLimitReached
+              ? "本日の送信上限に達しました"
+              : resendWaitSec > 0
+                ? `再送できます（あと${resendWaitSec}秒）`
+                : "確認メールを再送信する"}
           </button>
           <p className="login-switch">
             <button type="button" className="text-link" onClick={logout}>別のアカウントでログインする</button>

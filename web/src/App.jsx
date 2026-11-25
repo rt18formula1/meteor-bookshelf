@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "./firebase.js";
+import { maybeAutoSendVerificationEmail } from "./verifyEmail.js";
 import { useApp } from "./store.jsx";
 import LoginScreen from "./components/LoginScreen.jsx";
 import VerifyEmailScreen from "./components/VerifyEmailScreen.jsx";
@@ -37,6 +38,10 @@ export default function App() {
         emailVerified: fbUser.emailVerified,
         isPasswordUser: fbUser.providerData.some((p) => p.providerId === "password"),
       } : null);
+      /* メール確認機能の導入前（2026-11-25以前）に登録した既存の未確認ユーザーには、
+         ログイン時に確認メールを自動で送る（30分に1回まで、1日5回まで。確認済みには送らない）。
+         新規登録直後は登録時の送信記録があるため送らない */
+      if (fbUser) maybeAutoSendVerificationEmail(fbUser);
     });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps

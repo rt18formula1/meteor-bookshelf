@@ -7,6 +7,7 @@ import {
   GoogleAuthProvider,
 } from "firebase/auth";
 import { auth } from "../firebase.js";
+import { recordVerificationEmailSent } from "../verifyEmail.js";
 import { IconBookLogo } from "./Icons.jsx";
 
 /* Firebase Auth のエラーコードを日本語の案内に変換する */
@@ -50,6 +51,9 @@ export default function LoginScreen() {
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
         try {
           await sendEmailVerification(cred.user);
+          /* 登録時の送信を記録する。直後のログイン時（onAuthStateChanged）の自動送信が
+             すぐに重なって送らないようにするため */
+          recordVerificationEmailSent();
         } catch (_) {
           /* 送信失敗時は確認画面の「再送信」から送り直せる */
         }
