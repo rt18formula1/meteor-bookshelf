@@ -33,10 +33,6 @@ npx wrangler dev
 
 ## デプロイ（Cloudflare）
 
-1. `npx wrangler login`
-2. `npx wrangler d1 create bookshelf-db` → 発行された `database_id` を `wrangler.toml` に記入
-3. `npx wrangler kv namespace create IMAGES` → 発行された `id` を `wrangler.toml` に記入
-4. `npx wrangler d1 execute bookshelf-db --remote --file=schema.sql`
-5. `npx wrangler deploy`
+mainブランチへpushすると、Cloudflare Workers Buildsが自動でビルド（`npm run build`）とデプロイ（`npx wrangler deploy`）を行います。設定はCloudflareダッシュボードの Workers & Pages → meteor-bookshelf → Settings → Builds で確認できます。
 
-または Cloudflare ダッシュボードで本リポジトリを Workers/Pages の Git 連携に接続してもデプロイできます（その際も D1 / KV の作成とバインディング設定が必要です）。
+手動でデプロイする場合は、リポジトリのルートで `npx wrangler deploy` を実行します（要 `wrangler login`）。
