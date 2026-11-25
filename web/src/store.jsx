@@ -29,7 +29,7 @@ export function AppProvider({ children }) {
   const closeDetail = useCallback(() => setDetail(null), []);
   const openForm = useCallback((prefill = {}) => setFormPrefill(prefill), []);
   const closeForm = useCallback(() => setFormPrefill(null), []);
-  const openCoverEditor = useCallback((file, onDone) => setCoverEditor({ file, onDone }), []);
+  const openCoverEditor = useCallback((file, onDone, label) => setCoverEditor({ file, onDone, label: label || "表紙" }), []);
   const closeCoverEditor = useCallback(() => setCoverEditor(null), []);
 
   const value = {

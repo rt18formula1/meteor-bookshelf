@@ -73,7 +73,7 @@ export default function ItemFormModal() {
   const onPhotoSelected = (e) => {
     const f = e.target.files[0];
     e.target.value = "";
-    if (f) openCoverEditor(f, (key) => setImageKey(key));
+    if (f) openCoverEditor(f, (key) => setImageKey(key), "表表紙");
   };
 
   return (

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Modal from "./Modal.jsx";
 import Cover from "./Cover.jsx";
-import { api, apiJson } from "../api.js";
+import { api, apiJson, apiImageObjectUrl } from "../api.js";
 import { useApp } from "../store.jsx";
 import { TYPE_BADGE, externalLinks, fmtDate, fmtPrice } from "../utils.js";
 import { IconCamera } from "./Icons.jsx";
@@ -117,6 +117,7 @@ export default function ItemDetailModal() {
     } catch (e) { toast(e.message); }
   };
 
+  const SLOT_LABELS = { image_key: "表表紙", spine_key: "背表紙", side_key: "裏表紙" };
   const onCoverSelected = (e) => {
     const f = e.target.files[0];
     e.target.value = "";
@@ -128,7 +129,7 @@ export default function ItemDetailModal() {
         bumpItems();
         toast("表紙を更新しました");
       } catch (err) { toast(err.message); }
-    });
+    }, "表表紙");
   };
 
   /* 画像スロット（表表紙=image_key／背表紙=spine_key／裏表紙=side_key）の差し替え・削除 */
@@ -142,21 +143,27 @@ export default function ItemDetailModal() {
       toast(msg);
     } catch (err) { toast(err.message); } finally { setSlotBusy(false); }
   };
-  const onSlotFile = async (e) => {
+  /* スロットの写真は全スロット共通で台形補正エディタ経由にする
+     （エディタ側に「補正せずそのまま使う」もある） */
+  const onSlotFile = (e) => {
     const f = e.target.files[0];
     e.target.value = "";
     const field = slotFieldRef.current;
     if (!f || !item || !field) return;
+    openCoverEditor(f, (key) => putItemKey(field, key, `${SLOT_LABELS[field]}の画像を更新しました`), SLOT_LABELS[field]);
+  };
+  /* 登録済みの写真そのものに台形補正をかける */
+  const editSlotImage = async (field, keyVal) => {
+    if (!keyVal || slotBusy) return;
     setSlotBusy(true);
     try {
-      const fd = new FormData();
-      fd.append("file", f);
-      const res = await api("/api/images", { method: "POST", body: fd });
-      const updated = await apiJson(`/api/items/${item.id}`, "PUT", { ...item, [field]: res.key });
-      setItem(updated);
-      bumpItems();
-      toast("画像を更新しました");
-    } catch (err) { toast(err.message); } finally { setSlotBusy(false); }
+      const url = await apiImageObjectUrl(keyVal);
+      const blob = await (await fetch(url)).blob();
+      const f = new File([blob], "photo.jpg", { type: blob.type || "image/jpeg" });
+      openCoverEditor(f, (key) => putItemKey(field, key, `${SLOT_LABELS[field]}を補正しました`), SLOT_LABELS[field]);
+    } catch (err) {
+      toast("画像の読み込みに失敗しました");
+    } finally { setSlotBusy(false); }
   };
   const pickSlotFile = (field) => {
     slotFieldRef.current = field;
@@ -267,8 +274,8 @@ export default function ItemDetailModal() {
                   <button type="button" className="btn-secondary" disabled={slotBusy} onClick={() => pickSlotFile(s.field)}>
                     {s.keyVal ? "差し替え" : "登録"}
                   </button>
-                  {s.field === "image_key" && (
-                    <button type="button" className="btn-secondary" disabled={slotBusy} onClick={() => coverFileRef.current && coverFileRef.current.click()}>
+                  {s.keyVal && (
+                    <button type="button" className="btn-secondary" disabled={slotBusy} onClick={() => editSlotImage(s.field, s.keyVal)}>
                       台形補正
                     </button>
                   )}
