@@ -115,6 +115,8 @@ export default function VerifyEmailScreen() {
             <p className="muted small">{user && user.email ? `${user.email} 宛に確認メールを送信しました。` : "確認メールを送信しました。"}メール内のリンクを開いて認証を完了してください。</p>
           </div>
           <p className="muted small">認証が完了するまで、本棚の表示・登録はご利用いただけません。メールが届かない場合は、迷惑メールフォルダをご確認ください。</p>
+          <p className="muted small">複数の確認メールが届いている場合は、一番新しいメールのリンクを開いてください。古いリンクは使えません。</p>
+          <p className="muted small">リンクは1回だけ開き、開いたあとはアプリに戻って「認証が完了したらこちらを押す」を押してください。リンクの画面でエラーが出た場合でも、確認が完了していることがあります。</p>
           {notice && <p className="login-notice" role="status">{notice}</p>}
           {error && <p className="login-error" role="alert">{error}</p>}
           <button type="button" className="btn-primary btn-block" onClick={refresh} disabled={busy}>
