@@ -4,7 +4,7 @@ const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
 
 export function AppProvider({ children }) {
-  const [user, setUser] = useState(undefined); // undefined=確認中, null=未ログイン, {id,email}=ログイン済み（Firebase Auth）
+  const [user, setUser] = useState(undefined); // undefined=確認中, null=未ログイン, {id,email,emailVerified,isPasswordUser}=ログイン済み（Firebase Auth）
   const [view, setView] = useState("home");
   const [totalCount, setTotalCount] = useState(0);
   const [toastMsg, setToastMsg] = useState("");

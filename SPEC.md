@@ -52,6 +52,7 @@
 6. **認証（小規模公開のため）**
    - Firebase Authentication（プロジェクト: meteor-bookshelf、Spark無料プラン＝月間アクティブユーザー5万人まで無料）で認証する。自前のパスワード管理・セッションCookieは持たない
    - ログイン方法：メールアドレス＋パスワード／Googleログイン。フロントは Firebase SDK でログインし、全APIリクエストに ID トークン（Authorization: Bearer）を付与する
+   - メール確認（2026-11-25追加、Stripe のセキュリティ対策申告「ユーザー登録時の個人情報の確認（メールアドレス）」に該当）：メールアドレス＋パスワードで新規登録した際は確認メールを送信する。メール確認が完了するまでは確認画面を表示し、Worker 側でも API を 401（email_not_verified）で拒否する。Google ログインは Google 側でメールアドレスが確認済みのため対象外
    - Worker 側は Google の JWKS で ID トークンの署名・クレーム（aud/iss/exp/sub/email）を検証し、firebase_uid（なければメールアドレス）で D1 のユーザーを解決・自動作成する
    - ユーザーごとに自分の棚だけが見える
 7. **CSVエクスポート（必須、2026-11-25 塚本様指示）**

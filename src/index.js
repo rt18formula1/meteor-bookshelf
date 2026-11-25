@@ -136,6 +136,14 @@ async function currentUser(request, env) {
   if (!m) return null;
   const payload = await verifyFirebaseToken(m[1].trim(), env);
   if (!payload) return null;
+  /* メール確認（Stripe のセキュリティ対策申告「ユーザー登録時の個人情報の確認（メールアドレス）」に該当）:
+     メールアドレス＋パスワードで登録したユーザーは、メール確認が完了するまで API を利用できない。
+     Google ログインは Google 側でメールアドレスが確認済みのため対象外。
+     未確認の場合は _emailNotVerified フラグ付きのオブジェクトを返し、呼び出し側で 401 を返す */
+  const provider = payload.firebase && payload.firebase.sign_in_provider;
+  if (provider === "password" && payload.email_verified !== true) {
+    return { _emailNotVerified: true };
+  }
   const uid = payload.sub;
   const email = String(payload.email).toLowerCase();
   /* Notion 連携設定・サブスクリプション状態も含めて返す（内部利用のみ。API レスポンスに出す場合は呼び出し側で絞ること） */
@@ -1234,6 +1242,7 @@ export default {
       if (path.startsWith("/api/")) {
         const user = await currentUser(request, env);
         if (!user) return json({ error: "unauthorized" }, 401);
+        if (user._emailNotVerified) return json({ error: "email_not_verified" }, 401);
         /* /api/auth/me は id と email のみ返す（Notion トークン等の設定値は出さない） */
         if (path === "/api/auth/me" && request.method === "GET") return json({ id: user.id, email: user.email });
         if (path === "/api/settings" && request.method === "GET") return getUserSettings(env, user);

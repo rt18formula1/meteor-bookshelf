@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendEmailVerification,
   signInWithPopup,
   GoogleAuthProvider,
 } from "firebase/auth";
@@ -44,9 +45,16 @@ export default function LoginScreen() {
       if (mode === "login") {
         await signInWithEmailAndPassword(auth, email.trim(), password);
       } else {
-        await createUserWithEmailAndPassword(auth, email.trim(), password);
+        /* 新規登録時は確認メールを送る。認証が完了するまでは確認画面が表示され、API は利用できない。
+           （メール確認＝Stripe のセキュリティ対策申告「ユーザー登録時の個人情報の確認（メールアドレス）」に該当） */
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        try {
+          await sendEmailVerification(cred.user);
+        } catch (_) {
+          /* 送信失敗時は確認画面の「再送信」から送り直せる */
+        }
       }
-      /* 成功時は onAuthStateChanged が画面を切り替える */
+      /* 成功時は onAuthStateChanged が画面を切り替える（未確認の場合は確認画面へ） */
     } catch (e) {
       setError(toJapaneseError(e));
       setBusy(false);

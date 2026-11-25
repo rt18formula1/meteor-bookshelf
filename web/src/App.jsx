@@ -3,6 +3,7 @@ import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "./firebase.js";
 import { useApp } from "./store.jsx";
 import LoginScreen from "./components/LoginScreen.jsx";
+import VerifyEmailScreen from "./components/VerifyEmailScreen.jsx";
 import HomeView from "./views/HomeView.jsx";
 import SearchView from "./views/SearchView.jsx";
 import ScanView from "./views/ScanView.jsx";
@@ -30,7 +31,12 @@ export default function App() {
   /* 認証は Firebase Authentication。onAuthStateChanged でユーザー状態を管理する */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (fbUser) => {
-      setUser(fbUser ? { id: fbUser.uid, email: fbUser.email } : null);
+      setUser(fbUser ? {
+        id: fbUser.uid,
+        email: fbUser.email,
+        emailVerified: fbUser.emailVerified,
+        isPasswordUser: fbUser.providerData.some((p) => p.providerId === "password"),
+      } : null);
     });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -52,6 +58,11 @@ export default function App() {
 
   if (user === null) {
     return <LoginScreen />;
+  }
+
+  /* メールアドレス＋パスワードで登録し、メール確認が未完了の場合は確認画面を表示する（API 側でも 401 を返す） */
+  if (user.isPasswordUser && !user.emailVerified) {
+    return <VerifyEmailScreen />;
   }
 
   /* /admin は管理画面（単独ページ）。権限の判定は API 側で行う */

@@ -224,6 +224,15 @@ label input, label select { margin-top: 4px; }
   font-size: 14px;
   margin: 0 0 12px;
 }
+.login-notice {
+  color: var(--success);
+  background: rgba(20, 147, 67, 0.07);
+  border: 1px solid rgba(20, 147, 67, 0.25);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 14px;
+  margin: 0 0 12px;
+}
 .login-divider {
   display: flex; align-items: center; gap: 12px;
   margin: 18px 0 14px;
