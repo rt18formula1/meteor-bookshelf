@@ -27,6 +27,7 @@ export default function HomeView({ viewMode, setViewMode }) {
   const [homeType, setHomeType] = useState("");
   const [folder, setFolder] = useState(""); // ""=すべて, "none"=未分類, フォルダID（文字列）=そのフォルダ
   const [folders, setFolders] = useState([]);
+  const [uncategorizedCount, setUncategorizedCount] = useState(0);
   const [showFolderManager, setShowFolderManager] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [items, setItems] = useState([]);
@@ -82,7 +83,11 @@ export default function HomeView({ viewMode, setViewMode }) {
     (async () => {
       try {
         const data = await listFolders();
-        if (!cancelled) setFolders(data.folders || []);
+        if (!cancelled) {
+          setFolders(data.folders || []);
+          /* 未分類件数はサーバーから取得する（1アイテムが複数フォルダに入るため、全体−合計では求まらない） */
+          setUncategorizedCount(data.uncategorized_count || 0);
+        }
       } catch { /* フォルダが取れない場合はチップを出さない */ }
     })();
     return () => { cancelled = true; };
@@ -160,9 +165,6 @@ export default function HomeView({ viewMode, setViewMode }) {
   const selectedItem = items.find((x) => x.id === selectedId) || null;
   const isEmpty = total === 0 && homeType === "" && category === "" && folder === "";
   const grandTotal = counts[""] != null ? counts[""] : total;
-  /* 未分類の件数 = 全体 - 各フォルダの件数の合計 */
-  const folderCountSum = folders.reduce((s, f) => s + (f.item_count || 0), 0);
-  const uncategorizedCount = Math.max(0, grandTotal - folderCountSum);
   const selectedFolder = folder && folder !== "none" ? folders.find((f) => String(f.id) === folder) || null : null;
 
   if (editing) {

@@ -1,27 +1,39 @@
 import React, { useEffect, useState } from "react";
-import { getPublicFolder, publicCoverSrc } from "../api.js";
+import { getPublicCollection, getPublicFolder, publicCoverSrc, publicSpineSrc } from "../api.js";
 import { TYPE_LABEL, spineColor, spineTextColor } from "../utils.js";
 import { IconBookLogo } from "../components/Icons.jsx";
 
-/* 公開ページ（/s/:shareId）。ログイン不要・読み取り専用。
+/* 公開ページ（/s/:shareId＝フォルダ、/s/all/:shareId＝本棚全体）。ログイン不要・読み取り専用。
    App.jsx から認証チェックの前に表示される */
 export default function PublicView() {
-  const shareId = (window.location.pathname.split("/")[2] || "").trim();
-  const [state, setState] = useState({ loading: true, folder: null, items: [], error: "" });
+  const parts = window.location.pathname.split("/").filter(Boolean);
+  const isCollection = parts[0] === "s" && parts[1] === "all";
+  const shareId = (isCollection ? parts[2] : parts[1] || "").trim();
+  const [state, setState] = useState({ loading: true, target: null, items: [], error: "" });
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const data = await getPublicFolder(shareId);
-        if (!cancelled) setState({ loading: false, folder: data.folder, items: data.items || [], error: "" });
+        const data = isCollection
+          ? await getPublicCollection(shareId)
+          : await getPublicFolder(shareId);
+        if (!cancelled) {
+          setState({
+            loading: false,
+            target: isCollection ? data.collection : data.folder,
+            items: data.items || [],
+            error: "",
+          });
+        }
       } catch (e) {
         if (!cancelled) {
-          setState({ loading: false, folder: null, items: [], error: "このページは存在しないか、非公開です" });
+          setState({ loading: false, target: null, items: [], error: "このページは存在しないか、非公開です" });
         }
       }
     })();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareId]);
 
   if (state.loading) {
@@ -33,7 +45,7 @@ export default function PublicView() {
     );
   }
 
-  if (state.error || !state.folder) {
+  if (state.error || !state.target) {
     return (
       <div className="public-page">
         <header className="topbar">
@@ -47,7 +59,7 @@ export default function PublicView() {
         <main className="main">
           <section className="view">
             <p className="empty-text">{state.error}</p>
-            <p className="muted small">共有URLが間違っているか、フォルダが非公開になっている可能性があります。</p>
+            <p className="muted small">共有URLが間違っているか、{isCollection ? "本棚全体" : "フォルダ"}が非公開になっている可能性があります。</p>
             <a className="btn-secondary btn-small" href="/lp">私の本棚について</a>
           </section>
         </main>
@@ -55,7 +67,7 @@ export default function PublicView() {
     );
   }
 
-  const { folder, items } = state;
+  const { target, items } = state;
   return (
     <div className="public-page">
       <header className="topbar">
@@ -72,14 +84,15 @@ export default function PublicView() {
       <main className="main">
         <section className="view">
           <p className="hero-eyebrow">共有された本棚</p>
-          <h1 className="hero-title">{folder.name}</h1>
-          <p className="muted">全{folder.item_count}点</p>
+          <h1 className="hero-title">{target.name}</h1>
+          <p className="muted">全{target.item_count}点</p>
           {items.length === 0 ? (
-            <p className="empty-text">このフォルダにはまだアイテムがありません。</p>
+            <p className="empty-text">{isCollection ? "この本棚にはまだアイテムがありません。" : "このフォルダにはまだアイテムがありません。"}</p>
           ) : (
             <div className="public-grid">
               {items.map((item) => {
-                const src = publicCoverSrc(item);
+                /* 本棚全体では棚と同じ優先順位（背表紙→表表紙→裏表紙→外部表紙）で画像を選ぶ */
+                const src = isCollection ? publicSpineSrc(item) : publicCoverSrc(item);
                 return (
                   <div className="public-card" key={item.id}>
                     <div className="public-cover">

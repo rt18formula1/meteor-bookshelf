@@ -13,9 +13,12 @@ CREATE TABLE IF NOT EXISTS users (
   sub_source TEXT NOT NULL DEFAULT '',       -- 権利の取得方法: stripe | code | admin
   stripe_customer_id TEXT NOT NULL DEFAULT '',
   stripe_subscription_id TEXT NOT NULL DEFAULT '',
+  public_share_id TEXT NOT NULL DEFAULT '',  -- 本棚全体の公開URL用（15文字のランダム文字列。空は未発行）
+  is_public INTEGER NOT NULL DEFAULT 0,      -- 本棚全体の公開（1=公開、0=非公開）
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_public_share ON users(public_share_id) WHERE public_share_id != '';
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
@@ -66,6 +69,15 @@ CREATE TABLE IF NOT EXISTS folders (
 );
 CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_folders_share ON folders(share_id);
+
+-- 1アイテム＝複数フォルダの中間テーブル（正本）。items.folder_id は互換のため残し、最初のフォルダと同期させる。
+CREATE TABLE IF NOT EXISTS item_folders (
+  item_id INTEGER NOT NULL REFERENCES items(id),
+  folder_id INTEGER NOT NULL REFERENCES folders(id),
+  PRIMARY KEY (item_id, folder_id)
+);
+CREATE INDEX IF NOT EXISTS idx_item_folders_folder ON item_folders(folder_id, item_id);
+CREATE INDEX IF NOT EXISTS idx_item_folders_item ON item_folders(item_id);
 
 CREATE TABLE IF NOT EXISTS memos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

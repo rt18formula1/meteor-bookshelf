@@ -164,7 +164,10 @@ async function currentUser(request, env) {
 /* ---------- folders ---------- */
 /* フォルダのスキーマ保証。schema.sql が正本（新規DB用）だが、既存DBにも
    反映されるよう Worker 起動時に CREATE TABLE / ALTER TABLE を実行する。
-   プロセスごとに1回だけ（重複エラーは無視）。 */
+   プロセスごとに1回だけ（重複エラーは無視）。
+   item_folders は「1アイテム＝複数フォルダ」の中間テーブル（正本）。
+   items.folder_id は互換のため残し、最初のフォルダと同期させる。
+   users.public_share_id / users.is_public は本棚全体の公開用。 */
 let schemaEnsured = null;
 function ensureSchema(env) {
   if (!schemaEnsured) {
@@ -184,6 +187,18 @@ function ensureSchema(env) {
         "CREATE INDEX IF NOT EXISTS idx_folders_share ON folders(share_id)",
         "CREATE INDEX IF NOT EXISTS idx_items_folder ON items(user_id, folder_id)",
         "ALTER TABLE items ADD COLUMN folder_id INTEGER",
+        `CREATE TABLE IF NOT EXISTS item_folders (
+          item_id INTEGER NOT NULL REFERENCES items(id),
+          folder_id INTEGER NOT NULL REFERENCES folders(id),
+          PRIMARY KEY (item_id, folder_id)
+        )`,
+        "CREATE INDEX IF NOT EXISTS idx_item_folders_folder ON item_folders(folder_id, item_id)",
+        "CREATE INDEX IF NOT EXISTS idx_item_folders_item ON item_folders(item_id)",
+        /* 既存の単一フォルダ所属を中間テーブルへ移行する（2回目以降は主キー重複で無視される） */
+        "INSERT INTO item_folders (item_id, folder_id) SELECT id, folder_id FROM items WHERE folder_id IS NOT NULL",
+        "ALTER TABLE users ADD COLUMN public_share_id TEXT",
+        "ALTER TABLE users ADD COLUMN is_public INTEGER",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_public_share ON users(public_share_id) WHERE public_share_id != ''",
       ];
       for (const sql of stmts) {
         try { await env.DB.prepare(sql).run(); } catch (_) { /* 既存の列・表・索引はエラーを無視 */ }
@@ -237,8 +252,8 @@ async function listItems(request, env, user) {
   if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
   if (type && ["book", "cd", "dvd", "magazine", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
   if (category) { where += " AND category = ?"; binds.push(category); }
-  if (folder === "none") { where += " AND folder_id IS NULL"; }
-  else if (/^\d+$/.test(folder)) { where += " AND folder_id = ?"; binds.push(parseInt(folder)); }
+  if (folder === "none") { where += " AND NOT EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = items.id)"; }
+  else if (/^\d+$/.test(folder)) { where += " AND EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = items.id AND f.folder_id = ?)"; binds.push(parseInt(folder)); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
   const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM items ${where}`).bind(...binds).first();
@@ -292,12 +307,16 @@ function validItemBody(b) {
   out.price = String(b.price || "").trim().slice(0, 20);
   out.location = String(b.location || "").trim().slice(0, 60);
   out.category = String(b.category || "").trim().slice(0, 60);
-  /* フォルダ: 数値のときだけ採用する。所有権の確認は呼び出し側（resolveFolderId）で行う */
-  out.folder_id = null;
-  if (b.folder_id !== null && b.folder_id !== undefined && b.folder_id !== "") {
+  /* フォルダ: folder_ids（配列）が正本。従来の folder_id（単数）が来た場合は1要素の配列として扱う。
+     どちらも無い場合は空（未分類）。所有権の確認は呼び出し側（resolveFolderIds）で行う */
+  out.folder_ids = [];
+  if (Array.isArray(b.folder_ids)) {
+    out.folder_ids = b.folder_ids.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0);
+  } else if (b.folder_id !== null && b.folder_id !== undefined && b.folder_id !== "") {
     const n = Number(b.folder_id);
-    if (Number.isInteger(n) && n > 0) out.folder_id = n;
+    if (Number.isInteger(n) && n > 0) out.folder_ids = [n];
   }
+  out.folder_id = out.folder_ids.length ? out.folder_ids[0] : null;
   out.cover_url = String(b.cover_url || "").trim();
   out.image_key = String(b.image_key || "").trim();
   out.spine_key = String(b.spine_key || "").trim();
@@ -308,31 +327,59 @@ function validItemBody(b) {
   return out;
 }
 
-/* フォルダIDの所有権を確認する。自分のフォルダならIDを返し、他人のもの・存在しないものは null（未分類）にする */
-async function resolveFolderId(env, user, folderId) {
-  if (!folderId) return null;
-  const row = await env.DB.prepare("SELECT id FROM folders WHERE id = ? AND user_id = ?").bind(folderId, user.id).first();
-  return row ? row.id : null;
+/* フォルダID配列の所有権を確認し、自分のフォルダだけを返す（重複除去・数値のみ・入力順を維持） */
+async function resolveFolderIds(env, user, ids) {
+  const clean = [...new Set((Array.isArray(ids) ? ids : []).map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!clean.length) return [];
+  const placeholders = clean.map(() => "?").join(",");
+  const rows = await env.DB.prepare(`SELECT id FROM folders WHERE user_id = ? AND id IN (${placeholders})`).bind(user.id, ...clean).all();
+  const mine = new Set((rows.results || []).map((r) => r.id));
+  return clean.filter((id) => mine.has(id));
+}
+
+/* アイテムの所属フォルダID一覧（中間テーブルが正本） */
+async function listItemFolderIds(env, itemId) {
+  const rows = await env.DB.prepare("SELECT folder_id FROM item_folders WHERE item_id = ? ORDER BY folder_id ASC").bind(itemId).all();
+  return (rows.results || []).map((r) => r.folder_id);
+}
+
+/* 中間テーブルを同期する。folderIds は所有権確認済みのID一覧。
+   items.folder_id（互換用）も先頭要素に合わせる（空なら NULL） */
+async function syncItemFolders(env, itemId, folderIds) {
+  await env.DB.prepare("DELETE FROM item_folders WHERE item_id = ?").bind(itemId).run();
+  if (folderIds.length) {
+    const stmts = folderIds.map((fid) =>
+      env.DB.prepare("INSERT INTO item_folders (item_id, folder_id) VALUES (?, ?)").bind(itemId, fid));
+    await env.DB.batch(stmts);
+  }
+  const first = folderIds.length ? folderIds[0] : null;
+  await env.DB.prepare("UPDATE items SET folder_id = ? WHERE id = ?").bind(first, itemId).run();
 }
 
 async function createItem(request, env, user, ctx) {
   const b = validItemBody(await request.json().catch(() => ({})));
   if (!b) return err("タイトルは必須です");
-  const folderId = await resolveFolderId(env, user, b.folder_id);
+  const folderIds = await resolveFolderIds(env, user, b.folder_ids);
+  const folderId = folderIds.length ? folderIds[0] : null;
   const now = Math.floor(Date.now() / 1000);
   const res = await env.DB.prepare(
     `INSERT INTO items (user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
   ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
   const item = await env.DB.prepare(`SELECT ${ITEM_COLS}, 0 AS memo_count FROM items WHERE id = ?`).bind(res.meta.last_row_id).first();
+  await syncItemFolders(env, item.id, folderIds);
+  item.folder_ids = folderIds;
   if (ctx) ctx.waitUntil(syncToNotion(env, user, item, "create", new URL(request.url).origin));
   return json(item, 201);
 }
 
 async function getItem(env, user, id) {
-  return env.DB.prepare(
+  const item = await env.DB.prepare(
     `SELECT ${ITEM_COLS}, (SELECT COUNT(*) FROM memos m WHERE m.item_id = items.id) AS memo_count FROM items WHERE id = ? AND user_id = ?`
   ).bind(id, user.id).first();
+  if (!item) return null;
+  item.folder_ids = await listItemFolderIds(env, id);
+  return item;
 }
 
 async function updateItem(request, env, user, id, ctx) {
@@ -340,10 +387,12 @@ async function updateItem(request, env, user, id, ctx) {
   if (!existing) return err("見つかりません", 404);
   const b = validItemBody(await request.json().catch(() => ({})));
   if (!b) return err("タイトルは必須です");
-  const folderId = await resolveFolderId(env, user, b.folder_id);
+  const folderIds = await resolveFolderIds(env, user, b.folder_ids);
+  const folderId = folderIds.length ? folderIds[0] : null;
   await env.DB.prepare(
     `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, folder_id=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
   ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
+  await syncItemFolders(env, id, folderIds);
   const updated = await getItem(env, user, id);
   if (ctx) ctx.waitUntil(syncToNotion(env, user, updated, "update", new URL(request.url).origin));
   return json(updated);
@@ -353,6 +402,7 @@ async function deleteItem(env, user, id, ctx) {
   const existing = await getItem(env, user, id);
   if (!existing) return err("見つかりません", 404);
   await env.DB.prepare("DELETE FROM memos WHERE item_id = ? AND user_id = ?").bind(id, user.id).run();
+  await env.DB.prepare("DELETE FROM item_folders WHERE item_id = ?").bind(id).run();
   await env.DB.prepare("DELETE FROM items WHERE id = ? AND user_id = ?").bind(id, user.id).run();
   for (const key of [existing.image_key, existing.spine_key, existing.side_key]) {
     await deleteImage(env, key);
@@ -364,13 +414,18 @@ async function deleteItem(env, user, id, ctx) {
 /* ---------- folders ---------- */
 const FOLDER_COLS = "id, user_id, name, share_id, is_public, sort_order, created_at, updated_at";
 
-/* フォルダ一覧（自分のものだけ。件数付き・並び順） */
+/* フォルダ一覧（自分のものだけ。件数付き・並び順）。
+   件数は中間テーブルから数える（1アイテムが複数フォルダに入るため）。
+   未分類件数（どのフォルダにも属さないアイテム数）も一緒に返す */
 async function listFolders(env, user) {
   const rows = await env.DB.prepare(
-    `SELECT ${FOLDER_COLS}, (SELECT COUNT(*) FROM items i WHERE i.folder_id = folders.id AND i.user_id = ?) AS item_count
+    `SELECT ${FOLDER_COLS}, (SELECT COUNT(*) FROM item_folders f JOIN items i ON i.id = f.item_id WHERE f.folder_id = folders.id AND i.user_id = ?) AS item_count
      FROM folders WHERE user_id = ? ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC, id ASC`
   ).bind(user.id, user.id).all();
-  return json({ folders: rows.results || [] });
+  const unc = await env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM items WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = items.id)`
+  ).bind(user.id).first();
+  return json({ folders: rows.results || [], uncategorized_count: unc ? unc.c : 0 });
 }
 
 async function getFolder(env, user, id) {
@@ -423,11 +478,16 @@ async function updateFolder(request, env, user, id) {
   return json(updated);
 }
 
-/* フォルダ削除：中のアイテムは未分類（folder_id=NULL）に戻し、アイテム自体は削除しない */
+/* フォルダ削除：中間テーブルの該当行だけを消す。アイテム自体は削除しない。
+   互換用の items.folder_id は、残ったフォルダの先頭（なければ NULL）に合わせ直す */
 async function deleteFolder(env, user, id) {
   const folder = await getFolder(env, user, id);
   if (!folder) return err("見つかりません", 404);
-  await env.DB.prepare("UPDATE items SET folder_id = NULL WHERE folder_id = ? AND user_id = ?").bind(id, user.id).run();
+  await env.DB.prepare("DELETE FROM item_folders WHERE folder_id = ?").bind(id).run();
+  await env.DB.prepare(
+    `UPDATE items SET folder_id = (SELECT MIN(folder_id) FROM item_folders WHERE item_id = items.id)
+     WHERE user_id = ? AND folder_id = ?`
+  ).bind(user.id, id).run();
   await env.DB.prepare("DELETE FROM folders WHERE id = ? AND user_id = ?").bind(id, user.id).run();
   return json({ ok: true });
 }
@@ -1336,8 +1396,8 @@ function buildItemFilter(request) {
   if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
   if (type && ["book", "cd", "dvd", "magazine", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
   if (category) { where += " AND category = ?"; binds.push(category); }
-  if (folder === "none") { where += " AND folder_id IS NULL"; }
-  else if (/^\d+$/.test(folder)) { where += " AND folder_id = ?"; binds.push(parseInt(folder)); }
+  if (folder === "none") { where += " AND NOT EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = items.id)"; }
+  else if (/^\d+$/.test(folder)) { where += " AND EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = items.id AND f.folder_id = ?)"; binds.push(parseInt(folder)); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
   return { where, binds };
@@ -1468,7 +1528,7 @@ async function exportToSheets(request, env, user) {
 /* ---------- 公開ページ（認証不要・読み取り専用） ----------
    公開フォルダは /s/:shareId でログインなしに閲覧できる。
    返す情報は表示に必要なものだけ（メールアドレス・ユーザーID・メモ等は含めない） */
-const PUBLIC_ITEM_COLS = "i.id, i.type, i.title, i.creator, i.publisher, i.isbn, i.catno, i.edition, i.price, i.cover_url, i.image_key";
+const PUBLIC_ITEM_COLS = "i.id, i.type, i.title, i.creator, i.publisher, i.isbn, i.catno, i.edition, i.price, i.cover_url, i.image_key, i.spine_key, i.side_key";
 
 /* 公開フォルダの情報と中のアイテム一覧。非公開・存在しない shareId は404 */
 async function getPublicFolder(env, shareId) {
@@ -1478,18 +1538,77 @@ async function getPublicFolder(env, shareId) {
   if (!folder) return err("見つかりません", 404);
   const rows = await env.DB.prepare(
     `SELECT ${PUBLIC_ITEM_COLS} FROM items i
-     WHERE i.folder_id = ? ORDER BY (i.sort_order IS NULL), i.sort_order ASC, i.created_at ASC, i.id ASC LIMIT 500`
+     WHERE EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = i.id AND f.folder_id = ?)
+     ORDER BY (i.sort_order IS NULL), i.sort_order ASC, i.created_at ASC, i.id ASC LIMIT 500`
   ).bind(folder.id).all();
   const items = rows.results || [];
   return json({ folder: { name: folder.name, share_id: folder.share_id, item_count: items.length }, items });
 }
 
-/* 公開フォルダ内アイテムの画像（R2 本命 / KV は旧キーの読み取り互換）。
-   公開フォルダに属さない画像キーは404。認証なし・公開キャッシュ可 */
+/* ---------- 本棚全体の公開（/s/all/:shareId） ----------
+   ユーザー単位で本棚全体を公開できる。users.public_share_id / users.is_public で管理する。
+   返す情報は表示に必要なものだけ（メールアドレス・ユーザーID・メモ等は含めない） */
+async function getPublicCollection(env, shareId) {
+  const user = await env.DB.prepare(
+    "SELECT id FROM users WHERE public_share_id = ? AND is_public = 1"
+  ).bind(shareId).first();
+  if (!user) return err("見つかりません", 404);
+  const rows = await env.DB.prepare(
+    `SELECT ${PUBLIC_ITEM_COLS} FROM items i
+     WHERE i.user_id = ? ORDER BY (i.sort_order IS NULL), i.sort_order ASC, i.created_at ASC, i.id ASC LIMIT 500`
+  ).bind(user.id).all();
+  const items = rows.results || [];
+  return json({ collection: { name: "私の本棚", share_id: shareId, item_count: items.length }, items });
+}
+
+/* 本棚全体の公開設定を取得する（認証必須） */
+async function getPublicCollectionSettings(request, env, user) {
+  const row = await env.DB.prepare("SELECT public_share_id, is_public FROM users WHERE id = ?").bind(user.id).first();
+  const shareId = (row && row.public_share_id) || "";
+  const isPublic = !!((row && row.is_public) || 0);
+  return json({
+    is_public: isPublic,
+    share_id: shareId,
+    url: shareId ? `${new URL(request.url).origin}/s/all/${shareId}` : "",
+  });
+}
+
+/* 本棚全体の公開設定を更新する（認証必須）。{ is_public } を受け付け、
+   公開にする際に share_id が未発行なら新規発行する */
+async function updatePublicCollectionSettings(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  if (typeof b.is_public !== "boolean") return err("is_public が必要です");
+  let row = await env.DB.prepare("SELECT public_share_id FROM users WHERE id = ?").bind(user.id).first();
+  let shareId = (row && row.public_share_id) || "";
+  if (b.is_public && !shareId) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const candidate = generateShareId();
+      try {
+        await env.DB.prepare("UPDATE users SET public_share_id = ? WHERE id = ? AND (public_share_id IS NULL OR public_share_id = '')")
+          .bind(candidate, user.id).run();
+        shareId = candidate;
+        break;
+      } catch (e) {
+        if (!String((e && e.message) || "").includes("UNIQUE")) throw e;
+      }
+    }
+    if (!shareId) return err("公開URLの発行に失敗しました", 500);
+  }
+  await env.DB.prepare("UPDATE users SET is_public = ? WHERE id = ?").bind(b.is_public ? 1 : 0, user.id).run();
+  return getPublicCollectionSettings(request, env, user);
+}
+
+/* 公開アイテムの画像（R2 本命 / KV は旧キーの読み取り互換）。
+   公開フォルダ内のアイテム、または本棚全体を公開中のユーザーのアイテムの画像だけ返す。
+   それ以外は404。認証なし・公開キャッシュ可 */
 async function servePublicImage(env, key) {
   const row = await env.DB.prepare(
-    `SELECT 1 FROM items i JOIN folders f ON f.id = i.folder_id
-     WHERE f.is_public = 1 AND (i.image_key = ? OR i.spine_key = ? OR i.side_key = ?)`
+    `SELECT 1 FROM items i
+     WHERE (i.image_key = ? OR i.spine_key = ? OR i.side_key = ?)
+     AND (
+       EXISTS (SELECT 1 FROM item_folders f JOIN folders fo ON fo.id = f.folder_id WHERE f.item_id = i.id AND fo.is_public = 1)
+       OR EXISTS (SELECT 1 FROM users u WHERE u.id = i.user_id AND u.is_public = 1)
+     )`
   ).bind(key, key, key).first();
   if (!row) return err("見つかりません", 404);
   if (env.IMAGES_R2) {
@@ -1525,13 +1644,16 @@ async function servePublicPage(request, env, shareId) {
   try {
     const folder = await env.DB.prepare("SELECT id, name FROM folders WHERE share_id = ? AND is_public = 1").bind(shareId).first();
     if (folder) {
-      const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM items WHERE folder_id = ?").bind(folder.id).first();
+      const countRow = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM items i WHERE EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = i.id AND f.folder_id = ?)"
+      ).bind(folder.id).first();
       const count = countRow ? countRow.c : 0;
       title = `${folder.name} — 私の本棚`;
       desc = `「${folder.name}」 ${count}点の本棚を共有しています`;
       const imgRow = await env.DB.prepare(
-        `SELECT image_key, cover_url FROM items
-         WHERE folder_id = ? AND (image_key != '' OR cover_url != '')
+        `SELECT image_key, cover_url FROM items i
+         WHERE EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = i.id AND f.folder_id = ?)
+         AND (image_key != '' OR cover_url != '')
          ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC, id ASC LIMIT 1`
       ).bind(folder.id).first();
       if (imgRow) {
@@ -1540,15 +1662,56 @@ async function servePublicPage(request, env, shareId) {
       }
     }
   } catch (_) { /* OGP の取得に失敗してもページ自体は返す */ }
-  const og = [
+  const og = buildOgTags({ title, desc, url: `${origin}/s/${shareId}`, image });
+  html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtmlAttr(title)}</title>`);
+  html = html.replace("</head>", og + "\n</head>");
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/* OGP メタタグを組み立てる */
+function buildOgTags({ title, desc, url, image }) {
+  return [
     `<meta property="og:type" content="website">`,
     `<meta property="og:site_name" content="私の本棚">`,
     `<meta property="og:title" content="${escapeHtmlAttr(title)}">`,
     `<meta property="og:description" content="${escapeHtmlAttr(desc)}">`,
-    `<meta property="og:url" content="${escapeHtmlAttr(origin + "/s/" + shareId)}">`,
+    `<meta property="og:url" content="${escapeHtmlAttr(url)}">`,
     image ? `<meta property="og:image" content="${escapeHtmlAttr(image)}">` : "",
     image ? `<meta name="twitter:card" content="summary_large_image">` : `<meta name="twitter:card" content="summary">`,
   ].filter(Boolean).join("\n");
+}
+
+/* /s/all/:shareId の本棚全体の公開ページ。index.html に本棚全体に応じた OGP を差し込んで返す。
+   非公開・存在しない場合は汎用のタイトル・説明にする（React 側で「見つかりません」を表示） */
+async function servePublicCollectionPage(request, env, shareId) {
+  const origin = new URL(request.url).origin;
+  const assetRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url).toString(), { method: "GET" }));
+  let html = await assetRes.text();
+  let title = "私の本棚 — Bookshelf";
+  let desc = "本棚を共有しています";
+  let image = "";
+  try {
+    const user = await env.DB.prepare("SELECT id FROM users WHERE public_share_id = ? AND is_public = 1").bind(shareId).first();
+    if (user) {
+      const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM items WHERE user_id = ?").bind(user.id).first();
+      const count = countRow ? countRow.c : 0;
+      title = "私の本棚";
+      desc = `私の本棚 ${count}点を共有しています`;
+      const imgRow = await env.DB.prepare(
+        `SELECT image_key, spine_key, side_key, cover_url FROM items
+         WHERE user_id = ? AND (image_key != '' OR spine_key != '' OR side_key != '' OR cover_url != '')
+         ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC, id ASC LIMIT 1`
+      ).bind(user.id).first();
+      if (imgRow) {
+        const key = imgRow.image_key || imgRow.spine_key || imgRow.side_key || "";
+        if (key) image = `${origin}/api/public/images/${encodeURIComponent(key)}`;
+        else if (imgRow.cover_url) image = imgRow.cover_url;
+      }
+    }
+  } catch (_) { /* OGP の取得に失敗してもページ自体は返す */ }
+  const og = buildOgTags({ title, desc, url: `${origin}/s/all/${shareId}`, image });
   html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtmlAttr(title)}</title>`);
   html = html.replace("</head>", og + "\n</head>");
   return new Response(html, {
@@ -1570,7 +1733,13 @@ export default {
       /* Stripe Webhook は認証なし（署名検証で正当性を確認する） */
       if (path === "/api/billing/webhook" && request.method === "POST") return billingWebhook(request, env);
 
-      /* 公開ページ /s/:shareId は OGP を差し込んだ index.html を返す（認証不要） */
+      /* 公開ページ /s/all/:shareId は本棚全体の公開ページ（OGP付き・認証不要）。
+         /s/:shareId はフォルダの公開ページ */
+      const cm = path.match(/^\/s\/all\/([A-Za-z0-9]+)$/);
+      if (cm && request.method === "GET") {
+        await ensureSchema(env);
+        return servePublicCollectionPage(request, env, cm[1]);
+      }
       const sm = path.match(/^\/s\/([A-Za-z0-9]+)$/);
       if (sm && request.method === "GET") {
         await ensureSchema(env);
@@ -1582,6 +1751,7 @@ export default {
         await ensureSchema(env);
         let pm;
         if ((pm = path.match(/^\/api\/public\/folders\/([A-Za-z0-9]+)$/)) && request.method === "GET") return getPublicFolder(env, pm[1]);
+        if ((pm = path.match(/^\/api\/public\/collection\/([A-Za-z0-9]+)$/)) && request.method === "GET") return getPublicCollection(env, pm[1]);
         if ((pm = path.match(/^\/api\/public\/images\/(.+)$/)) && request.method === "GET") return servePublicImage(env, decodeURIComponent(pm[1]));
         return err("Not Found", 404);
       }
@@ -1595,6 +1765,8 @@ export default {
         if (path === "/api/auth/me" && request.method === "GET") return json({ id: user.id, email: user.email });
         if (path === "/api/settings" && request.method === "GET") return getUserSettings(env, user);
         if (path === "/api/settings" && request.method === "PUT") return updateUserSettings(request, env, user);
+        if (path === "/api/settings/public-collection" && request.method === "GET") return getPublicCollectionSettings(request, env, user);
+        if (path === "/api/settings/public-collection" && request.method === "PUT") return updatePublicCollectionSettings(request, env, user);
         if (path === "/api/license/redeem" && request.method === "POST") return redeemLicense(request, env, user);
         if (path === "/api/billing/checkout" && request.method === "POST") return billingCheckout(request, env, user);
         /* 管理 API（ハンドラ側でも管理者チェックを行う） */

@@ -822,6 +822,8 @@ label input, label select { margin-top: 4px; }
 .detail-head { display: flex; gap: 18px; margin-bottom: 16px; }
 .detail-cover { flex: 0 0 auto; }
 .detail-cover img, .detail-cover .cover-generated { width: 110px; aspect-ratio: 0.707; object-fit: cover; border-radius: var(--radius-sm); box-shadow: var(--shadow-md); display: block; }
+/* アップロードした表表紙は自然な比率で表示する（幅・高さはインラインスタイルで指定） */
+.detail-cover-natural img, .detail-cover-natural .cover-generated { width: 100%; height: 100%; aspect-ratio: auto; }
 .detail-head-info { flex: 1; min-width: 0; }
 .detail-head-info h2 { font-size: 22px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
@@ -919,6 +921,18 @@ label input, label select { margin-top: 4px; }
 /* 共有モーダル（2026-11-26追加） */
 .share-public-box { background: #f5eee6; border-radius: var(--radius-md); padding: 12px; margin-bottom: 14px; }
 .share-actions { display: flex; flex-direction: column; gap: 10px; }
+
+/* SNS共有（2026-11-26追加） */
+.sns-box { background: #f5eee6; border-radius: var(--radius-md); padding: 12px; margin-bottom: 14px; }
+.sns-box h3 { margin: 0 0 8px; font-size: 15px; }
+.sns-template { width: 100%; min-height: 96px; resize: vertical; font-size: 14px; line-height: 1.5; padding: 8px 10px; border: 1px solid #e3d7c9; border-radius: var(--radius-sm); background: var(--surface); color: var(--fg); }
+.sns-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* フォルダの複数選択（チェックボックス一覧） */
+.folder-field { display: block; font-size: 14px; font-weight: 500; margin-bottom: 12px; }
+.folder-checks { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.folder-check { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.folder-check input { width: 18px; height: 18px; accent-color: var(--primary); }
 
 /* 公開ページ（2026-11-26追加） */
 .public-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin-top: 18px; }

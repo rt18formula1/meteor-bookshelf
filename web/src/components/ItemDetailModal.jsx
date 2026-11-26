@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Modal from "./Modal.jsx";
 import Cover from "./Cover.jsx";
-import { api, apiJson, apiImageObjectUrl, listFolders } from "../api.js";
+import { api, apiJson, apiImageObjectUrl, listFolders, loadImageSize } from "../api.js";
 import { useApp } from "../store.jsx";
 import { TYPE_BADGE, externalLinks, fmtDate, fmtPrice } from "../utils.js";
 import { IconCamera } from "./Icons.jsx";
@@ -17,6 +17,24 @@ export default function ItemDetailModal() {
   const [labels, setLabels] = useState({ locations: [], categories: [] });
   const [folders, setFolders] = useState([]);
   const [slotBusy, setSlotBusy] = useState(false);
+  /* アップロードした表表紙（image_key）がある場合は、その画像の自然な比率で表示する。
+     幅110px・高さ200px以内に収める。画像がない・リンク画像のみの場合は従来の 0.707 のまま */
+  const [coverRatio, setCoverRatio] = useState(null);
+  const coverKey = item && item.image_key;
+  useEffect(() => {
+    let cancelled = false;
+    setCoverRatio(null);
+    if (!coverKey) return undefined;
+    loadImageSize(`/api/images/${encodeURIComponent(coverKey)}`)
+      .then((s) => { if (!cancelled && s) setCoverRatio(s.width / s.height); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [coverKey]);
+  const coverBox = coverRatio
+    ? (coverRatio >= 110 / 200
+      ? { width: 110, height: Math.round(110 / coverRatio) }
+      : { width: Math.round(200 * coverRatio), height: 200 })
+    : null;
   const memoRef = useRef(null);
   const coverFileRef = useRef(null);
   const slotFileRef = useRef(null);
@@ -41,7 +59,9 @@ export default function ItemDetailModal() {
           type: it.type, status: it.status, title: it.title,
           creator: it.creator || "", publisher: it.publisher || "", isbn: it.isbn || "", catno: it.catno || "",
           edition: it.edition || "", price: it.price || "", location: it.location || "", category: it.category || "",
-          folder_id: it.folder_id != null && it.folder_id !== "" ? String(it.folder_id) : "",
+          folder_ids: Array.isArray(it.folder_ids)
+            ? it.folder_ids.map((v) => String(v))
+            : (it.folder_id != null && it.folder_id !== "" ? [String(it.folder_id)] : []),
           prog_cur: it.prog_cur || "", prog_total: it.prog_total || "",
         });
         api("/api/labels").then((d) => { if (!cancelled) setLabels(d); }).catch(() => {});
@@ -63,13 +83,27 @@ export default function ItemDetailModal() {
 
   const set = (k) => (e) => setFields((f) => ({ ...f, [k]: e.target.value }));
 
+  /* フォルダの複数選択（チェックボックス）。未選択なら未分類 */
+  const toggleFolder = (fid) => {
+    const id = String(fid);
+    setFields((f) => ({
+      ...f,
+      folder_ids: (f.folder_ids || []).includes(id)
+        ? (f.folder_ids || []).filter((x) => x !== id)
+        : [...(f.folder_ids || []), id],
+    }));
+  };
+
   const save = async (e) => {
     e.preventDefault();
     if (!item || busy) return;
     setBusy(true);
     try {
+      const folderIds = (fields.folder_ids || []).map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0);
       const updated = await apiJson(`/api/items/${item.id}`, "PUT", {
         ...fields,
+        folder_ids: folderIds,
+        folder_id: folderIds.length ? folderIds[0] : null,
         cover_url: item.cover_url || "",
         image_key: item.image_key || "",
         spine_key: item.spine_key || "",
@@ -182,7 +216,10 @@ export default function ItemDetailModal() {
       ) : (
         <>
           <div className="detail-head">
-            <div className="detail-cover">
+            <div
+              className={`detail-cover${coverBox ? " detail-cover-natural" : ""}`}
+              style={coverBox ? { width: coverBox.width, height: coverBox.height } : undefined}
+            >
               <Cover item={item} />
             </div>
             <div className="detail-head-info">
@@ -243,14 +280,21 @@ export default function ItemDetailModal() {
               <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
               <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="detail-locations" /></label>
               <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="detail-categories" /></label>
-              <label>フォルダ
-                <select value={fields.folder_id} onChange={set("folder_id")}>
-                  <option value="">未分類</option>
+              <div className="folder-field">フォルダ（複数選択可）
+                <span className="folder-checks">
+                  {folders.length === 0 && <span className="muted small">フォルダがありません（未分類になります）</span>}
                   {folders.map((f) => (
-                    <option key={f.id} value={String(f.id)}>{f.name}</option>
+                    <label key={f.id} className="folder-check">
+                      <input
+                        type="checkbox"
+                        checked={(fields.folder_ids || []).includes(String(f.id))}
+                        onChange={() => toggleFolder(f.id)}
+                      />
+                      {f.name}
+                    </label>
                   ))}
-                </select>
-              </label>
+                </span>
+              </div>
               <datalist id="detail-locations">
                 {labels.locations.map((v) => <option key={v} value={v} />)}
               </datalist>

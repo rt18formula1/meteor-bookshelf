@@ -2,9 +2,11 @@
    日本語は Canvas に描画して画像化するため、フォントの問題が出ない。
    表紙画像は取得できない場合があるため、取得失敗時は色タイル＋頭文字で代替表示する
    （Canvas が汚染されると toBlob が使えなくなるため、取得失敗した画像は描画しない）。
-   PDF の文字はすべて Canvas 内に描く。jsPDF の doc.text は日本語を扱えず文字化けするため使わない。 */
+   PDF の文字はすべて Canvas 内に描く。jsPDF の doc.text は日本語を扱えず文字化けするため使わない。
+   表紙は自然な縦横比で描く（棚の行レイアウト）。画像の選択は棚と同じ優先順位
+   （背表紙 → 表表紙 → 裏表紙 → 外部表紙）で、背表紙・裏表紙だけの本も共有に画像が出る。 */
 import { apiImageObjectUrl } from "./api.js";
-import { spineColor, spineTextColor } from "./utils.js";
+import { spineColor, spineSrc, spineTextColor } from "./utils.js";
 
 /* JST の日時スタンプ（ファイル名用） */
 function jstStamp() {
@@ -33,14 +35,21 @@ async function loadImageBlobUrl(url, timeoutMs = 6000) {
   }
 }
 
-/* アイテムの表紙画像を HTMLImageElement として読み込む。失敗時は null */
+/* アイテムの表紙画像を HTMLImageElement として読み込む。失敗時は null。
+   画像の選択は棚と同じ優先順位（spineSrc：背表紙 → 表表紙 → 裏表紙 → 外部表紙）。
+   返すのは { img, objectUrl, owned, ratio }。owned は自分で作った blob URL かどうか
+   （apiImageObjectUrl の URL はアプリ全体でキャッシュ共有しているため revoke しない） */
 async function loadCoverImage(item) {
+  const src = spineSrc(item);
+  if (!src) return null;
   let objectUrl = null;
+  let owned = false;
   try {
-    if (item.image_key) {
-      objectUrl = await apiImageObjectUrl(item.image_key);
-    } else if (item.cover_url) {
-      objectUrl = await loadImageBlobUrl(item.cover_url);
+    if (src.startsWith("/api/images/")) {
+      objectUrl = await apiImageObjectUrl(decodeURIComponent(src.slice("/api/images/".length)));
+    } else {
+      objectUrl = await loadImageBlobUrl(src);
+      owned = !!objectUrl;
     }
     if (!objectUrl) return null;
     const img = await new Promise((resolve, reject) => {
@@ -50,9 +59,11 @@ async function loadCoverImage(item) {
       setTimeout(() => reject(new Error("timeout")), 8000);
       im.src = objectUrl;
     });
-    return { img, objectUrl };
+    const iw = img.naturalWidth || img.width || 1;
+    const ih = img.naturalHeight || img.height || 1;
+    return { img, objectUrl, owned, ratio: iw / ih };
   } catch (_) {
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (objectUrl && owned) URL.revokeObjectURL(objectUrl);
     return null;
   }
 }
@@ -61,8 +72,19 @@ async function loadCoverImage(item) {
 async function loadCovers(items) {
   return Promise.all(items.map((item) => loadCoverImage(item)));
 }
+/* 決まった数ずつに分けて読み込む（500件の一括読み込みで同時接続が膨らまないようにする） */
+async function loadCoversBatched(items, batchSize = 24) {
+  const out = new Array(items.length).fill(null);
+  for (let s = 0; s < items.length; s += batchSize) {
+    const batch = items.slice(s, s + batchSize);
+    const res = await Promise.all(batch.map((it) => loadCoverImage(it)));
+    res.forEach((r, j) => { out[s + j] = r; });
+  }
+  return out;
+}
+/* 自分で作った blob URL だけを破棄する（apiImageObjectUrl のキャッシュは共有物のため残す） */
 function revokeCovers(covers) {
-  for (const c of covers) if (c && c.objectUrl) URL.revokeObjectURL(c.objectUrl);
+  for (const c of covers) if (c && c.owned && c.objectUrl) URL.revokeObjectURL(c.objectUrl);
 }
 
 /* テキストを指定幅で折り返す（Canvas 用。日本語は1文字ずつ送る） */
@@ -99,24 +121,24 @@ function drawTitleTile(ctx, item, x, y, w, h) {
   ctx.fillStyle = spineColor(item);
   ctx.fillRect(x, y, w, h);
   ctx.fillStyle = spineTextColor(item);
-  ctx.font = `700 ${Math.round(w * 0.42)}px "Noto Sans JP", sans-serif`;
+  ctx.font = `700 ${Math.max(10, Math.round(Math.min(w, h) * 0.42))}px "Noto Sans JP", sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText((item.title || "?").slice(0, 1), x + w / 2, y + h / 2 + w * 0.04);
+  ctx.fillText((item.title || "?").slice(0, 1), x + w / 2, y + h / 2 + Math.min(w, h) * 0.04);
 }
 
-/* 表紙セルを描く（正方形・cover-fit、取得失敗時は色タイル）。タイトルは描かない */
-function drawCoverCell(ctx, item, loaded, x, y, size) {
+/* 表紙セルを描く（自然な縦横比の矩形。取得失敗時は色タイル）。タイトルは描かない */
+function drawCoverCellNatural(ctx, item, loaded, x, y, w, h) {
   ctx.save();
   ctx.beginPath();
-  ctx.rect(x, y, size, size);
+  ctx.rect(x, y, w, h);
   ctx.clip();
-  if (loaded) drawCoverFit(ctx, loaded.img, x, y, size, size);
-  else drawTitleTile(ctx, item, x, y, size, size);
+  if (loaded) drawCoverFit(ctx, loaded.img, x, y, w, h);
+  else drawTitleTile(ctx, item, x, y, w, h);
   ctx.restore();
   ctx.strokeStyle = "rgba(45,26,8,0.12)";
   ctx.lineWidth = 2;
-  ctx.strokeRect(x, y, size, size);
+  ctx.strokeRect(x, y, w, h);
 }
 
 /* セルのタイトルを中央揃えで描く（最大 maxLines 行、はみ出す分は省略） */
@@ -133,14 +155,74 @@ function drawCellTitle(ctx, title, cx, topY, maxWidth, fontPx, lineHeight, maxLi
   ctx.restore();
 }
 
-/* 共有カード（1080×1080）を描く。5列×4行＝最大20件。
+/* ---------- 棚の行レイアウト ----------
+   行の高さを固定し、各冊の幅＝行高×自然比率として横に並べ、幅が足りなくなったら次の行へ折り返す。
+   セルの幅は表紙幅と minCellW の大きい方（タイトルが読める最低幅を確保し、表紙はセル内で中央寄せ）。
+   ratios: 各アイテムの幅／高さ比（画像がない場合は 0.707 の本型）。
+   返すのは { rows: [{ cells: [{ index, ratio, coverW, cellW, x }], width }], consumed }。
+   consumed は実際に配置できたアイテム数（maxRows を超えた分は含まない）。 */
+function layoutShelfRows(ratios, { areaWidth, coverH, minCellW, maxCoverW, gapX, maxRows }) {
+  const rows = [];
+  let row = [];
+  let rowW = 0;
+  const cellFor = (ratio) => {
+    const coverW = Math.max(28, Math.min(maxCoverW, Math.round(coverH * ratio)));
+    return { coverW, cellW: Math.max(minCellW, coverW) };
+  };
+  for (let i = 0; i < ratios.length; i++) {
+    const { coverW, cellW } = cellFor(ratios[i]);
+    if (row.length > 0 && rowW + gapX + cellW > areaWidth) {
+      rows.push({ cells: row, width: rowW });
+      if (rows.length >= maxRows) break;
+      row = [];
+      rowW = 0;
+    }
+    row.push({ index: i, ratio: ratios[i], coverW, cellW, x: 0 });
+    rowW = row.length === 1 ? cellW : rowW + gapX + cellW;
+  }
+  if (row.length && rows.length < maxRows) rows.push({ cells: row, width: rowW });
+  for (const r of rows) {
+    let x = 0;
+    for (const c of r.cells) { c.x = x; x += c.cellW + gapX; }
+  }
+  const consumed = rows.reduce((n, r) => n + r.cells.length, 0);
+  return { rows, consumed };
+}
+
+/* 棚の行を1行描く（表紙＋タイトル）。行は横方向に中央寄せする */
+function drawShelfRow(ctx, row, items, covers, y, { areaX, areaWidth, coverH, titleFont, titleLH, titleGap }) {
+  const offsetX = areaX + Math.round((areaWidth - row.width) / 2);
+  for (const cell of row.cells) {
+    const x = offsetX + cell.x;
+    const coverX = x + (cell.cellW - cell.coverW) / 2;
+    drawCoverCellNatural(ctx, items[cell.index], covers[cell.index], coverX, y, cell.coverW, coverH);
+    drawCellTitle(ctx, items[cell.index].title, x + cell.cellW / 2, y + coverH + titleGap, cell.cellW, titleFont, titleLH, 2);
+  }
+}
+
+/* 共有カード用のレイアウト定数（行高168 = 表紙110＋間隔6＋タイトル22px×2行（行間26＝52））。
+   グリッド 284-992：4行で 4*168 + 3*12 = 708。フッター1032。すべて1080以内に収まる */
+const CARD_LAYOUT = {
+  areaX: 56, areaWidth: 968, coverH: 110, minCellW: 96, maxCoverW: 240,
+  gapX: 12, rowGap: 12, maxRows: 4, titleFont: 22, titleLH: 26, titleGap: 6,
+};
+const CARD_ROW_H = CARD_LAYOUT.coverH + CARD_LAYOUT.titleGap + CARD_LAYOUT.titleLH * 2;
+const CARD_GRID_TOP = 284;
+
+/* PDFグリッドページ用のレイアウト定数（行高274 = 表紙208＋間隔8＋タイトル24px×2行（行間29＝58））。
+   グリッド 164-1622：5行で 5*274 + 4*22 = 1458。フッター1690。すべて1754以内に収まる */
+const PDF_LAYOUT = {
+  areaX: 70, areaWidth: 1100, coverH: 208, minCellW: 120, maxCoverW: 320,
+  gapX: 15, rowGap: 22, maxRows: 5, titleFont: 24, titleLH: 29, titleGap: 8,
+};
+const PDF_ROW_H = PDF_LAYOUT.coverH + PDF_LAYOUT.titleGap + PDF_LAYOUT.titleLH * 2;
+const PDF_GRID_TOP = 164;
+
+/* 共有カード（1080×1080）を描く。表紙は自然な縦横比で棚の行に並べる（最大20件）。
    高さの予算（すべて固定値で、フォルダ名の行数に依存しないためはみ出さない）：
      ブランド帯 0-10 / ブランド見出し baseline 84
      フォルダ名 52px・行間62 baseline 148・212（1行のときは中央の179）
-     冊数 baseline 258 / グリッド 284-992（708）/ フッター baseline 1032
-   グリッド：余白56・間隔12、セル幅184 = (1080-56*2-12*4)/5
-     行高168 = 表紙110＋間隔6＋タイトル22px×2行（行間26＝52）
-     284 + 4*168 + 3*12 = 992。フッター1032。すべて1080以内に収まる。 */
+     冊数 baseline 258 / グリッド 284-992（708）/ フッター baseline 1032 */
 export async function renderShareCard({ title, subtitle, items }) {
   const W = 1080;
   const H = 1080;
@@ -185,26 +267,13 @@ export async function renderShareCard({ title, subtitle, items }) {
   ctx.font = `500 30px "Noto Sans JP", sans-serif`;
   ctx.fillText(subtitle || "", M, 258);
 
-  /* 表紙グリッド（5列×4行＝最大20件） */
-  const COLS = 5;
-  const GAP = 12;
-  const CW = 184;
-  const RH = 168;
-  const CS = 110;
-  const TITLE_FONT = 22;
-  const TITLE_LH = 26;
-  const TITLE_GAP = 6;
-  const GRID_TOP = 284;
+  /* 表紙の棚（自然な縦横比で横に並べる。4行まで） */
   const covers = await loadCovers(list);
-  for (let i = 0; i < list.length; i++) {
-    const r = Math.floor(i / COLS);
-    const c = i % COLS;
-    const x = M + c * (CW + GAP);
-    const y = GRID_TOP + r * (RH + GAP);
-    const coverX = x + (CW - CS) / 2;
-    drawCoverCell(ctx, list[i], covers[i], coverX, y, CS);
-    drawCellTitle(ctx, list[i].title, x + CW / 2, y + CS + TITLE_GAP, CW, TITLE_FONT, TITLE_LH, 2);
-  }
+  const ratios = covers.map((c) => (c ? c.ratio : 0.707));
+  const { rows } = layoutShelfRows(ratios, CARD_LAYOUT);
+  rows.forEach((row, r) => {
+    drawShelfRow(ctx, row, list, covers, CARD_GRID_TOP + r * (CARD_ROW_H + CARD_LAYOUT.rowGap), CARD_LAYOUT);
+  });
   revokeCovers(covers);
 
   /* フッター（Canvas内に描く） */
@@ -260,14 +329,11 @@ export async function sharePng({ title, subtitle, items, text, url }) {
 }
 
 /* グリッドページ（A4比率 1240×1754）を描く。表紙＋タイトルのみ（作者・出版社・価格は出さない）。
-   5列×5行＝25件。ヘッダーにフォルダ名とページ番号、フッターはCanvas内に描く。
+   表紙は自然な縦横比で棚の行に並べる。pageRows は layoutShelfRows で作った行（5行まで）。
    高さの予算：
      ブランド帯 0-10 / ヘッダー baseline 104 / 区切り線 134
-     グリッド 164-1622（1458）/ フッター baseline 1690
-   グリッド：余白70・横間隔15、セル幅208 = (1240-70*2-15*4)/5、表紙208
-     行高274 = 表紙208＋間隔8＋タイトル24px×2行（行間29＝58）、行間22
-     164 + 5*274 + 4*22 = 1622。フッター1690。すべて1754以内に収まる。 */
-async function renderGridPage({ title, page, pageCount, rows }) {
+     グリッド 164-1622（1458）/ フッター baseline 1690 */
+async function renderGridPage({ title, page, pageCount, pageItems, pageCovers, pageRows }) {
   const W = 1240;
   const H = 1754;
   const M = 70;
@@ -275,7 +341,6 @@ async function renderGridPage({ title, page, pageCount, rows }) {
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext("2d");
-  const list = rows || [];
 
   ctx.fillStyle = "#fdf6ee";
   ctx.fillRect(0, 0, W, H);
@@ -301,27 +366,10 @@ async function renderGridPage({ title, page, pageCount, rows }) {
   ctx.lineTo(W - M, 134);
   ctx.stroke();
 
-  /* グリッド（5列×5行＝25件） */
-  const COLS = 5;
-  const GAP_X = 15;
-  const GAP_Y = 22;
-  const CW = 208;
-  const CS = 208;
-  const RH = 274;
-  const TITLE_FONT = 24;
-  const TITLE_LH = 29;
-  const TITLE_GAP = 8;
-  const GRID_TOP = 164;
-  const covers = await loadCovers(list);
-  for (let i = 0; i < list.length; i++) {
-    const r = Math.floor(i / COLS);
-    const c = i % COLS;
-    const x = M + c * (CW + GAP_X);
-    const y = GRID_TOP + r * (RH + GAP_Y);
-    drawCoverCell(ctx, list[i], covers[i], x, y, CS);
-    drawCellTitle(ctx, list[i].title, x + CW / 2, y + CS + TITLE_GAP, CW, TITLE_FONT, TITLE_LH, 2);
-  }
-  revokeCovers(covers);
+  /* 表紙の棚（自然な縦横比で横に並べる） */
+  pageRows.forEach((row, r) => {
+    drawShelfRow(ctx, row, pageItems, pageCovers, PDF_GRID_TOP + r * (PDF_ROW_H + PDF_LAYOUT.rowGap), PDF_LAYOUT);
+  });
 
   /* フッター（Canvas内に描く） */
   ctx.fillStyle = "#7a5a3a";
@@ -331,8 +379,23 @@ async function renderGridPage({ title, page, pageCount, rows }) {
   return canvas;
 }
 
+/* 比率だけからページ分けを決める。ratios の先頭から5行分ずつ取り、ページごとの { start, count } を返す。
+   描画パスでも同じ比率を使うため、計測と描画でページ分けがずれない */
+function paginateByRows(ratios, layout) {
+  const pages = [];
+  let start = 0;
+  while (start < ratios.length) {
+    const { consumed } = layoutShelfRows(ratios.slice(start), layout);
+    const take = Math.max(1, consumed);
+    pages.push({ start, count: take });
+    start += take;
+  }
+  return pages;
+}
+
 /* 共有PDFをダウンロードする。1ページ目に共有カード、続くページに表紙＋タイトルのグリッド（最大500件）。
-   日本語テキストはすべてCanvas内に描く（jsPDF の doc.text は日本語を扱えず文字化けするため使わない）。 */
+   日本語テキストはすべてCanvas内に描く（jsPDF の doc.text は日本語を扱えず文字化けするため使わない）。
+   ページ分けは比率の計測パスで先に確定させ、描画パスでは同じ比率でレイアウトする（ページ数の表示がずれない）。 */
 export async function downloadSharePdf({ title, subtitle, items }) {
   const list = (items || []).slice(0, 500);
   const { jsPDF } = await import("jspdf");
@@ -340,14 +403,22 @@ export async function downloadSharePdf({ title, subtitle, items }) {
   const card = await renderShareCard({ title, subtitle, items: list });
   const cardUrl = card.toDataURL("image/png");
   doc.addImage(cardUrl, "PNG", 0, 0, 210, 210);
-  const perPage = 25;
-  const pageCount = Math.ceil(list.length / perPage);
-  for (let p = 0; p < pageCount; p++) {
+  /* 計測パス：全アイテムの比率だけを先に読む（画像は保持しない。ページ数を確定させるため） */
+  const allCovers = await loadCoversBatched(list, 24);
+  const allRatios = allCovers.map((c) => (c ? c.ratio : 0.707));
+  revokeCovers(allCovers);
+  const pages = paginateByRows(allRatios, PDF_LAYOUT);
+  const pageCount = pages.length;
+  for (let p = 0; p < pages.length; p++) {
+    const pageItems = list.slice(pages[p].start, pages[p].start + pages[p].count);
+    const pageRatios = allRatios.slice(pages[p].start, pages[p].start + pages[p].count);
+    const pageCovers = await loadCovers(pageItems);
+    const { rows } = layoutShelfRows(pageRatios, PDF_LAYOUT);
     doc.addPage();
-    const rows = list.slice(p * perPage, (p + 1) * perPage);
-    const pageCanvas = await renderGridPage({ title, page: p + 1, pageCount, rows });
+    const pageCanvas = await renderGridPage({ title, page: p + 1, pageCount, pageItems, pageCovers, pageRows: rows });
     const url = pageCanvas.toDataURL("image/png");
     doc.addImage(url, "PNG", 0, 0, 210, 297);
+    revokeCovers(pageCovers);
   }
   doc.save(`bookshelf-${safeFileName(title)}-${jstStamp()}.pdf`);
   return true;

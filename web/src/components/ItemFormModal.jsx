@@ -8,7 +8,7 @@ import AuthedImage from "./AuthedImage.jsx";
 const EMPTY = {
   type: "book", status: "unread", title: "", creator: "", publisher: "",
   isbn: "", catno: "", edition: "", price: "", location: "", category: "",
-  folder_id: "", cover_url: "", prog_cur: "", prog_total: "",
+  folder_ids: [], cover_url: "", prog_cur: "", prog_total: "",
 };
 
 export default function ItemFormModal() {
@@ -34,7 +34,9 @@ export default function ItemFormModal() {
         price: formPrefill.price != null ? String(formPrefill.price) : "",
         location: formPrefill.location || "",
         category: formPrefill.category || "",
-        folder_id: formPrefill.folder_id != null && formPrefill.folder_id !== "" ? String(formPrefill.folder_id) : "",
+        folder_ids: Array.isArray(formPrefill.folder_ids)
+          ? formPrefill.folder_ids.map((v) => String(v))
+          : (formPrefill.folder_id != null && formPrefill.folder_id !== "" ? [String(formPrefill.folder_id)] : []),
         cover_url: formPrefill.cover_url || "",
         prog_cur: formPrefill.prog_cur ?? "",
         prog_total: formPrefill.prog_total ?? "",
@@ -49,6 +51,14 @@ export default function ItemFormModal() {
   if (!formPrefill) return null;
 
   const set = (k) => (e) => setFields((f) => ({ ...f, [k]: e.target.value }));
+  /* フォルダの複数選択（チェックボックス）。未選択なら未分類 */
+  const toggleFolder = (fid) => {
+    const id = String(fid);
+    setFields((f) => ({
+      ...f,
+      folder_ids: f.folder_ids.includes(id) ? f.folder_ids.filter((x) => x !== id) : [...f.folder_ids, id],
+    }));
+  };
   const previewUrl = imageKey ? `/api/images/${encodeURIComponent(imageKey)}` : fields.cover_url;
 
   const submit = async (e) => {
@@ -56,9 +66,11 @@ export default function ItemFormModal() {
     if (busy) return;
     setBusy(true);
     try {
+      const folderIds = (fields.folder_ids || []).map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0);
       await apiJson("/api/items", "POST", {
         ...fields,
-        folder_id: fields.folder_id === "" ? null : parseInt(fields.folder_id, 10),
+        folder_ids: folderIds,
+        folder_id: folderIds.length ? folderIds[0] : null,
         image_key: imageKey,
         prog_cur: fields.prog_cur === "" ? 0 : parseInt(fields.prog_cur, 10) || 0,
         prog_total: fields.prog_total === "" ? 0 : parseInt(fields.prog_total, 10) || 0,
@@ -115,14 +127,21 @@ export default function ItemFormModal() {
           <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
           <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="form-locations" /></label>
           <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="form-categories" /></label>
-          <label>フォルダ
-            <select value={fields.folder_id} onChange={set("folder_id")}>
-              <option value="">未分類</option>
+          <div className="folder-field">フォルダ（複数選択可）
+            <span className="folder-checks">
+              {folders.length === 0 && <span className="muted small">フォルダがありません（未分類になります）</span>}
               {folders.map((f) => (
-                <option key={f.id} value={String(f.id)}>{f.name}</option>
+                <label key={f.id} className="folder-check">
+                  <input
+                    type="checkbox"
+                    checked={(fields.folder_ids || []).includes(String(f.id))}
+                    onChange={() => toggleFolder(f.id)}
+                  />
+                  {f.name}
+                </label>
               ))}
-            </select>
-          </label>
+            </span>
+          </div>
           <label>表紙画像URL<input type="text" value={fields.cover_url} onChange={set("cover_url")} placeholder="https://..." /></label>
           <datalist id="form-locations">
             {labels.locations.map((v) => <option key={v} value={v} />)}

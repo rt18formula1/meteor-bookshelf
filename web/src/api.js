@@ -73,6 +73,31 @@ export function apiImageObjectUrl(key) {
   return imageUrlCache.get(key);
 }
 
+/* 画像の自然な寸法（naturalWidth / naturalHeight）を取得する。失敗時は null。
+   /api/images/ 配下は認証付きで取得した blob URL を使う（キャッシュされた URL は revoke しない）。
+   外部 URL はそのまま読む（寸法の読み取りだけなら CORS は不要） */
+export async function loadImageSize(src) {
+  if (!src) return null;
+  let url = src;
+  try {
+    if (src.startsWith("/api/images/")) {
+      url = await apiImageObjectUrl(decodeURIComponent(src.slice("/api/images/".length)));
+      if (!url) return null;
+    }
+    const size = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve({ width: im.naturalWidth || 0, height: im.naturalHeight || 0 });
+      im.onerror = () => reject(new Error("load failed"));
+      setTimeout(() => reject(new Error("timeout")), 8000);
+      im.src = url;
+    });
+    if (!size.width || !size.height) return null;
+    return size;
+  } catch (_) {
+    return null;
+  }
+}
+
 /* ---------- フォルダ ---------- */
 export const listFolders = () => api("/api/folders");
 export const createFolder = (name) => apiJson("/api/folders", "POST", { name });
@@ -83,6 +108,13 @@ export const reorderFolders = (ids) => apiJson("/api/folders/reorder", "PUT", { 
 /* 公開フォルダの取得（認証不要。api() は未ログイン時もそのまま送れる） */
 export const getPublicFolder = (shareId) => api(`/api/public/folders/${encodeURIComponent(shareId)}`);
 
+/* 本棚全体の公開設定（認証必須）。{ is_public, share_id, url } を返す */
+export const getPublicCollectionSettings = () => api("/api/settings/public-collection");
+export const updatePublicCollectionSettings = (patch) => apiJson("/api/settings/public-collection", "PUT", patch);
+
+/* 本棚全体の公開ページ取得（認証不要） */
+export const getPublicCollection = (shareId) => api(`/api/public/collection/${encodeURIComponent(shareId)}`);
+
 /* 公開画像URL（認証不要）。item.image_key がある場合に使う */
 export function publicImageUrl(key) {
   return key ? `/api/public/images/${encodeURIComponent(key)}` : "";
@@ -91,6 +123,15 @@ export function publicImageUrl(key) {
 export function publicCoverSrc(item) {
   if (!item) return "";
   if (item.image_key) return publicImageUrl(item.image_key);
+  if (item.cover_url) return item.cover_url;
+  return "";
+}
+/* 公開ページでの棚用画像URL。棚と同じ優先順位（背表紙 → 表表紙 → 裏表紙 → 外部表紙） */
+export function publicSpineSrc(item) {
+  if (!item) return "";
+  if (item.spine_key) return publicImageUrl(item.spine_key);
+  if (item.image_key) return publicImageUrl(item.image_key);
+  if (item.side_key) return publicImageUrl(item.side_key);
   if (item.cover_url) return item.cover_url;
   return "";
 }
