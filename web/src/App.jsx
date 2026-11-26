@@ -16,6 +16,7 @@ import PublicView from "./views/PublicView.jsx";
 import ItemDetailModal from "./components/ItemDetailModal.jsx";
 import ItemFormModal from "./components/ItemFormModal.jsx";
 import CoverEditorModal from "./components/CoverEditorModal.jsx";
+import PwaInstallPrompt from "./components/PwaInstallPrompt.jsx";
 import { IconBookLogo, IconMemo, IconScan, IconSearch, IconSettings, IconShelf } from "./components/Icons.jsx";
 
 const NAV = [
@@ -132,6 +133,7 @@ export default function App() {
       <ItemDetailModal />
       <ItemFormModal />
       <CoverEditorModal />
+      <PwaInstallPrompt />
     </div>
   );
 }

@@ -976,3 +976,26 @@ label input, label select { margin-top: 4px; }
   .folder-bar-actions { align-self: flex-end; }
   .public-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
 }
+
+/* PWAインストール案内バナー（スマホ・初回のみ。ボトムナビの上に表示） */
+.pwa-prompt {
+  position: fixed; left: 12px; right: 12px;
+  bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 60;
+  background: var(--surface);
+  border: 1px solid #e3d7c9;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 16px;
+  animation: pwa-prompt-in 250ms var(--ease-default);
+}
+@keyframes pwa-prompt-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.pwa-prompt-title { font-family: var(--font-display); font-weight: 700; font-size: 15px; padding-right: 28px; }
+.pwa-prompt-body { font-size: 13.5px; color: var(--fg-muted); margin-top: 4px; line-height: 1.6; }
+.pwa-prompt-actions { display: flex; gap: 8px; margin-top: 12px; }
+.pwa-prompt-actions .btn-primary, .pwa-prompt-actions .btn-secondary { flex: 1; padding: 10px 16px; font-size: 14px; }
+.pwa-prompt-close {
+  position: absolute; top: 8px; right: 8px;
+  background: none; border: none;
+  font-size: 18px; line-height: 1; color: var(--fg-muted);
+  padding: 4px 8px;
+}
