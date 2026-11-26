@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS items (
   image_key TEXT DEFAULT '',           -- 表表紙の画像キー（KV）
   spine_key TEXT DEFAULT '',           -- 背表紙の画像キー（KV）
   side_key TEXT DEFAULT '',            -- 横（側面）の画像キー（KV）
+  format TEXT DEFAULT '',              -- 判型（文庫・新書・B6・四六判・A5・菊判・B5・A4・その他。空は未設定）
+  height_mm INTEGER,                   -- 手動の高さ上書き（mm、100〜300。NULL は未指定）
   sort_order INTEGER,                 -- 手動並び順（NULL は未設定）
   notion_page_id TEXT NOT NULL DEFAULT '', -- 同期先 Notion ページID（未同期は空）
   status TEXT NOT NULL DEFAULT 'unread',   -- unread | reading | done

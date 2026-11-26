@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import Modal from "./Modal.jsx";
-import { api, apiJson, listFolders } from "../api.js";
+import { api, apiJson, listFolders, loadImageSize } from "../api.js";
 import { useApp } from "../store.jsx";
+import { FORMAT_OPTIONS, detectFormat, normalizeHeightMm } from "../utils.js";
 import { IconCamera } from "./Icons.jsx";
 import AuthedImage from "./AuthedImage.jsx";
 
@@ -9,6 +10,7 @@ const EMPTY = {
   type: "book", status: "unread", title: "", creator: "", publisher: "",
   isbn: "", catno: "", edition: "", price: "", location: "", category: "",
   folder_ids: [], cover_url: "", prog_cur: "", prog_total: "",
+  format: "", height_mm: "",
 };
 
 export default function ItemFormModal() {
@@ -21,31 +23,49 @@ export default function ItemFormModal() {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (formPrefill) {
-      setFields({
-        type: formPrefill.type || "book",
-        status: formPrefill.status || "unread",
-        title: formPrefill.title || "",
-        creator: formPrefill.creator || "",
-        publisher: formPrefill.publisher || "",
-        isbn: formPrefill.isbn || "",
-        catno: formPrefill.catno || "",
-        edition: formPrefill.edition || "",
-        price: formPrefill.price != null ? String(formPrefill.price) : "",
-        location: formPrefill.location || "",
-        category: formPrefill.category || "",
-        folder_ids: Array.isArray(formPrefill.folder_ids)
-          ? formPrefill.folder_ids.map((v) => String(v))
-          : (formPrefill.folder_id != null && formPrefill.folder_id !== "" ? [String(formPrefill.folder_id)] : []),
-        cover_url: formPrefill.cover_url || "",
-        prog_cur: formPrefill.prog_cur ?? "",
-        prog_total: formPrefill.prog_total ?? "",
+    if (!formPrefill) return undefined;
+    setFields({
+      type: formPrefill.type || "book",
+      status: formPrefill.status || "unread",
+      title: formPrefill.title || "",
+      creator: formPrefill.creator || "",
+      publisher: formPrefill.publisher || "",
+      isbn: formPrefill.isbn || "",
+      catno: formPrefill.catno || "",
+      edition: formPrefill.edition || "",
+      price: formPrefill.price != null ? String(formPrefill.price) : "",
+      location: formPrefill.location || "",
+      category: formPrefill.category || "",
+      folder_ids: Array.isArray(formPrefill.folder_ids)
+        ? formPrefill.folder_ids.map((v) => String(v))
+        : (formPrefill.folder_id != null && formPrefill.folder_id !== "" ? [String(formPrefill.folder_id)] : []),
+      cover_url: formPrefill.cover_url || "",
+      prog_cur: formPrefill.prog_cur ?? "",
+      prog_total: formPrefill.prog_total ?? "",
+      /* 書誌検索で判明した高さ（mm）はそのまま入れる。判型は下の自動判別で補う */
+      format: formPrefill.format || "",
+      height_mm: formPrefill.height_mm != null && formPrefill.height_mm !== "" ? String(formPrefill.height_mm) : "",
+    });
+    setImageKey(formPrefill.image_key || "");
+    let cancelled = false;
+    /* 判型の自動判別：書誌の高さ（height_mm）と表紙画像の比率から推定する。
+       書誌に判型がすでに入っている場合はそれを優先し、確実でない場合は未設定のままにする。
+       表紙画像の比率は非同期で読むため、判別が終わった時点で未入力の場合だけ反映する */
+    if ((formPrefill.type || "book") === "book" && !formPrefill.format) {
+      const coverUrl = formPrefill.cover_url || "";
+      const ratioP = coverUrl
+        ? loadImageSize(coverUrl).then((s) => (s ? s.width / s.height : null)).catch(() => null)
+        : Promise.resolve(null);
+      ratioP.then((ratio) => {
+        if (cancelled) return;
+        const f = detectFormat(formPrefill.height_mm, ratio);
+        if (f) setFields((prev) => (prev.format ? prev : { ...prev, format: f }));
       });
-      setImageKey(formPrefill.image_key || "");
-      /* 保有場所・カテゴリーの候補（取得できなければ通常のテキスト入力のまま） */
-      api("/api/labels").then(setLabels).catch(() => {});
-      listFolders().then((d) => setFolders(d.folders || [])).catch(() => {});
     }
+    /* 保有場所・カテゴリーの候補（取得できなければ通常のテキスト入力のまま） */
+    api("/api/labels").then((d) => { if (!cancelled) setLabels(d); }).catch(() => {});
+    listFolders().then((d) => { if (!cancelled) setFolders(d.folders || []); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [formPrefill]);
 
   if (!formPrefill) return null;
@@ -72,6 +92,8 @@ export default function ItemFormModal() {
         folder_ids: folderIds,
         folder_id: folderIds.length ? folderIds[0] : null,
         image_key: imageKey,
+        format: fields.type === "book" ? (fields.format || "") : "",
+        height_mm: normalizeHeightMm(fields.height_mm),
         prog_cur: fields.prog_cur === "" ? 0 : parseInt(fields.prog_cur, 10) || 0,
         prog_total: fields.prog_total === "" ? 0 : parseInt(fields.prog_total, 10) || 0,
       });
@@ -124,6 +146,16 @@ export default function ItemFormModal() {
           <label>{fields.type === "magazine" ? "JANコード" : "ISBN / バーコード"}<input type="text" value={fields.isbn} onChange={set("isbn")} placeholder={fields.type === "magazine" ? "例: 4912123450660" : ""} /></label>
           <label>規格品番（CD/DVD/BD）<input type="text" value={fields.catno} onChange={set("catno")} placeholder="例: VICL-12345" /></label>
           <label>版・仕様<input type="text" value={fields.edition} onChange={set("edition")} placeholder="例: 初回限定盤" /></label>
+          {fields.type === "book" && (
+            <label>判型
+              <select value={fields.format || ""} onChange={set("format")}>
+                {FORMAT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label>高さ（mm）<input type="number" min="100" max="300" value={fields.height_mm} onChange={set("height_mm")} placeholder="例: 210（100〜300）" /></label>
           <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
           <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="form-locations" /></label>
           <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="form-categories" /></label>

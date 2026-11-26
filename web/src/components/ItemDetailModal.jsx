@@ -3,7 +3,7 @@ import Modal from "./Modal.jsx";
 import Cover from "./Cover.jsx";
 import { api, apiJson, apiImageObjectUrl, listFolders, loadImageSize } from "../api.js";
 import { useApp } from "../store.jsx";
-import { TYPE_BADGE, externalLinks, fmtDate, fmtPrice } from "../utils.js";
+import { TYPE_BADGE, coverSrc, externalLinks, fmtDate, fmtPrice, FORMAT_LABEL, FORMAT_OPTIONS, normalizeHeightMm } from "../utils.js";
 import { IconCamera } from "./Icons.jsx";
 import AuthedImage from "./AuthedImage.jsx";
 
@@ -17,19 +17,21 @@ export default function ItemDetailModal() {
   const [labels, setLabels] = useState({ locations: [], categories: [] });
   const [folders, setFolders] = useState([]);
   const [slotBusy, setSlotBusy] = useState(false);
-  /* アップロードした表表紙（image_key）がある場合は、その画像の自然な比率で表示する。
-     幅110px・高さ200px以内に収める。画像がない・リンク画像のみの場合は従来の 0.707 のまま */
+  /* 表示する表表紙（アップロード画像 or リンク画像）の自然な比率で表示する。
+     幅110px・高さ200px以内に収める。寸法は表示時に画像から読み取るため、
+     既存の蔵書の画像（リンク画像を含む）にも同じように適用される。
+     画像がない場合は従来の 0.707 のまま */
   const [coverRatio, setCoverRatio] = useState(null);
-  const coverKey = item && item.image_key;
+  const coverSrcValue = item ? coverSrc(item) : "";
   useEffect(() => {
     let cancelled = false;
     setCoverRatio(null);
-    if (!coverKey) return undefined;
-    loadImageSize(`/api/images/${encodeURIComponent(coverKey)}`)
+    if (!coverSrcValue) return undefined;
+    loadImageSize(coverSrcValue)
       .then((s) => { if (!cancelled && s) setCoverRatio(s.width / s.height); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [coverKey]);
+  }, [coverSrcValue]);
   const coverBox = coverRatio
     ? (coverRatio >= 110 / 200
       ? { width: 110, height: Math.round(110 / coverRatio) }
@@ -59,6 +61,7 @@ export default function ItemDetailModal() {
           type: it.type, status: it.status, title: it.title,
           creator: it.creator || "", publisher: it.publisher || "", isbn: it.isbn || "", catno: it.catno || "",
           edition: it.edition || "", price: it.price || "", location: it.location || "", category: it.category || "",
+          format: it.format || "", height_mm: it.height_mm != null ? String(it.height_mm) : "",
           folder_ids: Array.isArray(it.folder_ids)
             ? it.folder_ids.map((v) => String(v))
             : (it.folder_id != null && it.folder_id !== "" ? [String(it.folder_id)] : []),
@@ -108,6 +111,8 @@ export default function ItemDetailModal() {
         image_key: item.image_key || "",
         spine_key: item.spine_key || "",
         side_key: item.side_key || "",
+        format: fields.type === "book" ? (fields.format || "") : "",
+        height_mm: normalizeHeightMm(fields.height_mm),
         prog_cur: fields.prog_cur === "" ? 0 : parseInt(fields.prog_cur, 10) || 0,
         prog_total: fields.prog_total === "" ? 0 : parseInt(fields.prog_total, 10) || 0,
       });
@@ -228,6 +233,8 @@ export default function ItemDetailModal() {
                 {item.isbn && <span className="badge badge-muted">ISBN {item.isbn}</span>}
                 {item.catno && <span className="badge badge-muted">品番 {item.catno}</span>}
                 {item.edition && <span className="badge badge-muted">{item.edition}</span>}
+                {item.format && FORMAT_LABEL[item.format] && <span className="badge badge-muted">判型 {FORMAT_LABEL[item.format]}</span>}
+                {item.height_mm && <span className="badge badge-muted">高さ {item.height_mm}mm</span>}
                 {item.price && <span className="badge badge-muted">{fmtPrice(item.price)}</span>}
                 {item.location && <span className="badge badge-muted">保有場所: {item.location}</span>}
                 {item.category && <span className="badge badge-muted">{item.category}</span>}
@@ -277,6 +284,16 @@ export default function ItemDetailModal() {
               <label>ISBN / バーコード<input type="text" value={fields.isbn} onChange={set("isbn")} /></label>
               <label>規格品番（CD/DVD/BD）<input type="text" value={fields.catno} onChange={set("catno")} placeholder="例: VICL-12345" /></label>
               <label>版・仕様<input type="text" value={fields.edition} onChange={set("edition")} placeholder="例: 初回限定盤" /></label>
+              {fields.type === "book" && (
+                <label>判型
+                  <select value={fields.format || ""} onChange={set("format")}>
+                    {FORMAT_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label>高さ（mm）<input type="number" min="100" max="300" value={fields.height_mm} onChange={set("height_mm")} placeholder="例: 210（100〜300）" /></label>
               <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
               <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="detail-locations" /></label>
               <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="detail-categories" /></label>

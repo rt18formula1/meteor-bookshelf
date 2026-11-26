@@ -199,6 +199,8 @@ function ensureSchema(env) {
         "ALTER TABLE users ADD COLUMN public_share_id TEXT",
         "ALTER TABLE users ADD COLUMN is_public INTEGER",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_public_share ON users(public_share_id) WHERE public_share_id != ''",
+        "ALTER TABLE items ADD COLUMN format TEXT",
+        "ALTER TABLE items ADD COLUMN height_mm INTEGER",
       ];
       for (const sql of stmts) {
         try { await env.DB.prepare(sql).run(); } catch (_) { /* 既存の列・表・索引はエラーを無視 */ }
@@ -220,7 +222,7 @@ function generateShareId() {
 }
 
 /* ---------- items ---------- */
-const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, sort_order, notion_page_id, status, prog_cur, prog_total, created_at, updated_at";
+const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, format, height_mm, sort_order, notion_page_id, status, prog_cur, prog_total, created_at, updated_at";
 
 /* 並び順: manual=手動（sort_order 昇順、NULL は後ろ）、title / creator / category / new / old / type */
 function sortClause(sort) {
@@ -321,6 +323,16 @@ function validItemBody(b) {
   out.image_key = String(b.image_key || "").trim();
   out.spine_key = String(b.spine_key || "").trim();
   out.side_key = String(b.side_key || "").trim();
+  /* 判型（書籍のみ。文庫・新書・B6・四六判・A5・菊判・B5・A4・その他・未設定）。
+     書籍以外は空にする。判型が分からない場合の高さ上書きは 100〜300mm に収める */
+  const FORMAT_VALUES = ["bunko", "shinsho", "b6", "shirokuban", "a5", "kikuban", "b5", "a4", "other"];
+  out.format = out.type === "book" && FORMAT_VALUES.includes(b.format) ? b.format : "";
+  if (b.height_mm === "" || b.height_mm === null || b.height_mm === undefined) {
+    out.height_mm = null;
+  } else {
+    const n = parseInt(b.height_mm, 10);
+    out.height_mm = Number.isInteger(n) && n > 0 ? Math.max(100, Math.min(300, n)) : null;
+  }
   out.status = ["unread", "reading", "done"].includes(b.status) ? b.status : "unread";
   out.prog_cur = Math.max(0, parseInt(b.prog_cur) || 0);
   out.prog_total = Math.max(0, parseInt(b.prog_total) || 0);
@@ -363,9 +375,9 @@ async function createItem(request, env, user, ctx) {
   const folderId = folderIds.length ? folderIds[0] : null;
   const now = Math.floor(Date.now() / 1000);
   const res = await env.DB.prepare(
-    `INSERT INTO items (user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
-  ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
+    `INSERT INTO items (user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, format, height_mm, sort_order, status, prog_cur, prog_total, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
+  ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, b.format, b.height_mm, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
   const item = await env.DB.prepare(`SELECT ${ITEM_COLS}, 0 AS memo_count FROM items WHERE id = ?`).bind(res.meta.last_row_id).first();
   await syncItemFolders(env, item.id, folderIds);
   item.folder_ids = folderIds;
@@ -390,8 +402,8 @@ async function updateItem(request, env, user, id, ctx) {
   const folderIds = await resolveFolderIds(env, user, b.folder_ids);
   const folderId = folderIds.length ? folderIds[0] : null;
   await env.DB.prepare(
-    `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, folder_id=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
-  ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
+    `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, folder_id=?, cover_url=?, image_key=?, spine_key=?, side_key=?, format=?, height_mm=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
+  ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, b.format, b.height_mm, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
   await syncItemFolders(env, id, folderIds);
   const updated = await getItem(env, user, id);
   if (ctx) ctx.waitUntil(syncToNotion(env, user, updated, "update", new URL(request.url).origin));
@@ -584,6 +596,53 @@ async function serveImage(env, user, key) {
 }
 
 /* ---------- bibliographic lookup ---------- */
+/* 書誌情報から本の物理的な高さ（mm）を読み取る（判型の自動判別用）。
+   確実な寸法が取れない場合は null を返し、判型は未設定のままにする。
+   - Google Books: volumeInfo.dimensions.height（例："21.59 cm"）
+   - NDL: dc:extent（例："259p ; 21cm"、"21×15cm" の場合は最初の数が高さ）
+   - OpenBD: onix.DescriptiveDetail.Measure（MeasureType "01"=高さ、mm単位）
+   検証結果：OpenBD の onix には Measure が入っていないことが多く、NDL の
+   dc:extent はページ数だけ（"259p"）のことが多い。Google Books は
+   dimensions を持つが、未認証アクセスは429（quota超過）になりやすい。
+   そのため寸法が取れるのは稀で、取れない場合は未設定のまま手動登録に任せる */
+function parseDimensionToMm(str) {
+  const m = String(str || "").match(/([\d.]+)\s*(cm|mm|in|"|inch|inches)/i);
+  if (!m) return null;
+  const v = Number(m[1]);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  const unit = m[2].toLowerCase();
+  if (unit === "cm") return Math.round(v * 10);
+  if (unit === "mm") return Math.round(v);
+  return Math.round(v * 25.4); // in / " / inch
+}
+function parseExtentHeightMm(extent) {
+  const s = String(extent || "");
+  /* "21×15cm" のように高さ×幅の場合は最初の数が高さ */
+  let m = s.match(/([\d.]+)\s*[×x]\s*([\d.]+)\s*cm/i);
+  if (m) return Math.round(Number(m[1]) * 10);
+  m = s.match(/([\d.]+)\s*cm/i);
+  if (m) return Math.round(Number(m[1]) * 10);
+  m = s.match(/([\d.]+)\s*mm/i);
+  if (m) return Math.round(Number(m[1]));
+  return null;
+}
+function openbdHeightMm(onix) {
+  try {
+    const dd = onix && onix.DescriptiveDetail;
+    if (!dd || !dd.Measure) return null;
+    const measures = Array.isArray(dd.Measure) ? dd.Measure : [dd.Measure];
+    for (const m of measures) {
+      if (!m || String(m.MeasureType || "") !== "01") continue;
+      const v = Number(m.Measurement);
+      if (!Number.isFinite(v) || v <= 0) continue;
+      const unit = String(m.MeasureUnitCode || "mm").toLowerCase();
+      if (unit === "mm") return Math.round(v);
+      if (unit === "cm") return Math.round(v * 10);
+      if (unit === "in") return Math.round(v * 25.4);
+    }
+  } catch (_) { /* 寸法が取れなければ null */ }
+  return null;
+}
 function xmlTag(xml, tag) {
   const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
   return m ? m[1].replace(/<!\[CDATA\[|\]\]>/g, "").replace(/&amp;/g, "&").trim() : "";
@@ -598,6 +657,7 @@ async function lookupOpenBD(code) {
   /* 価格: onix.ProductSupply.SupplyDetail.Price[].PriceAmount（JPY）。
      版: onix.DescriptiveDetail.EditionStatement。なければ空（推測で入れない） */
   let price = "", edition = "";
+  let height_mm = null;
   try {
     const onix = entry.onix || {};
     const prices = onix.ProductSupply && onix.ProductSupply.SupplyDetail && onix.ProductSupply.SupplyDetail.Price;
@@ -608,8 +668,9 @@ async function lookupOpenBD(code) {
     const es = onix.DescriptiveDetail && onix.DescriptiveDetail.EditionStatement;
     if (typeof es === "string") edition = es.trim();
     else if (es && typeof es.content === "string") edition = es.content.trim();
-  } catch (_) { /* 価格・版が取れなければ空のまま */ }
-  return { title: s.title || "", creator: s.author || "", publisher: s.publisher || "", isbn: s.isbn || code, catno: "", edition, price, cover_url: s.cover || "", type: "book", source: "OpenBD" };
+    height_mm = openbdHeightMm(onix);
+  } catch (_) { /* 価格・版・寸法が取れなければ空のまま */ }
+  return { title: s.title || "", creator: s.author || "", publisher: s.publisher || "", isbn: s.isbn || code, catno: "", edition, price, cover_url: s.cover || "", type: "book", source: "OpenBD", height_mm };
 }
 async function lookupGoogleBooks(code) {
   const r = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(code)}`);
@@ -621,7 +682,8 @@ async function lookupGoogleBooks(code) {
   if (v.imageLinks) {
     cover = (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail || "").replace("http://", "https://").replace("&edge=curl", "");
   }
-  return { title: v.title || "", creator: (v.authors || []).join(", "), publisher: v.publisher || "", isbn: code, catno: "", edition: "", price: "", cover_url: cover, type: "book", source: "Google Books" };
+  const height_mm = v.dimensions && v.dimensions.height ? parseDimensionToMm(v.dimensions.height) : null;
+  return { title: v.title || "", creator: (v.authors || []).join(", "), publisher: v.publisher || "", isbn: code, catno: "", edition: "", price: "", cover_url: cover, type: "book", source: "Google Books", height_mm };
 }
 async function lookupNDL(code) {
   const r = await fetch(`https://ndlsearch.ndl.go.jp/api/opensearch?isbn=${encodeURIComponent(code)}`);
@@ -634,10 +696,12 @@ async function lookupNDL(code) {
   const creator = xmlTag(itemXml, "dc:creator");
   const publisher = xmlTag(itemXml, "dc:publisher");
   const isBookCode = /^(978|979)/.test(code);
+  const height_mm = parseExtentHeightMm(xmlTag(itemXml, "dc:extent"));
   return {
     title, creator, publisher, isbn: code, catno: "", edition: "", price: "",
     cover_url: isBookCode ? `https://ndlsearch.ndl.go.jp/thumbnail/${code}.jpg` : "",
-    type: "other", source: "NDLサーチ",
+    /* ISBN（978/979始まり）なら書籍。それ以外はその他 */
+    type: isBookCode ? "book" : "other", source: "NDLサーチ", height_mm,
   };
 }
 /* 版・仕様の推定: release の disambiguation を正とし、タイトル内の
@@ -1431,12 +1495,13 @@ async function buildExportTable(env, user, request) {
     if (!memoMap.has(m.item_id)) memoMap.set(m.item_id, []);
     memoMap.get(m.item_id).push(m.body);
   }
-  const header = ["ID", "種別", "タイトル", "著者/アーティスト", "出版社/レーベル", "ISBN/バーコード", "規格品番", "版・仕様", "価格", "保有場所", "カテゴリー", "状態", "進捗（現在）", "進捗（全体）", "進捗率", "メモ件数", "メモ", "表紙URL", "登録日時", "更新日時"];
+  const FORMAT_LABEL_JA = { bunko: "文庫", shinsho: "新書", b6: "B6", shirokuban: "四六判", a5: "A5", kikuban: "菊判", b5: "B5", a4: "A4", other: "その他" };
+  const header = ["ID", "種別", "タイトル", "著者/アーティスト", "出版社/レーベル", "ISBN/バーコード", "規格品番", "版・仕様", "判型", "高さ（mm）", "価格", "保有場所", "カテゴリー", "状態", "進捗（現在）", "進捗（全体）", "進捗率", "メモ件数", "メモ", "表紙URL", "登録日時", "更新日時"];
   const table = [header];
   for (const it of items) {
     const pct = it.prog_total > 0 ? Math.min(100, Math.round((it.prog_cur / it.prog_total) * 100)) + "%" : "";
     table.push([
-      it.id, it.type, it.title, it.creator || "", it.publisher || "", it.isbn || "", it.catno || "", it.edition || "", it.price || "", it.location || "", it.category || "", it.status,
+      it.id, it.type, it.title, it.creator || "", it.publisher || "", it.isbn || "", it.catno || "", it.edition || "", FORMAT_LABEL_JA[it.format] || "", it.height_mm || "", it.price || "", it.location || "", it.category || "", it.status,
       it.prog_cur || 0, it.prog_total || 0, pct, it.memo_count || 0,
       (memoMap.get(it.id) || []).join("\n"), it.cover_url || "", fmtJST(it.created_at), fmtJST(it.updated_at),
     ]);
@@ -1528,7 +1593,7 @@ async function exportToSheets(request, env, user) {
 /* ---------- 公開ページ（認証不要・読み取り専用） ----------
    公開フォルダは /s/:shareId でログインなしに閲覧できる。
    返す情報は表示に必要なものだけ（メールアドレス・ユーザーID・メモ等は含めない） */
-const PUBLIC_ITEM_COLS = "i.id, i.type, i.title, i.creator, i.publisher, i.isbn, i.catno, i.edition, i.price, i.cover_url, i.image_key, i.spine_key, i.side_key";
+const PUBLIC_ITEM_COLS = "i.id, i.type, i.title, i.creator, i.publisher, i.isbn, i.catno, i.edition, i.price, i.cover_url, i.image_key, i.spine_key, i.side_key, i.format, i.height_mm";
 
 /* 公開フォルダの情報と中のアイテム一覧。非公開・存在しない shareId は404 */
 async function getPublicFolder(env, shareId) {
