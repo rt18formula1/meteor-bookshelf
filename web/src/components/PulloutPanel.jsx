@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from "react";
-import { STATUS_LABEL, TYPE_BADGE, externalLinks, fmtPrice, progressPct } from "../utils.js";
+import React, { useEffect, useRef, useState } from "react";
+import { STATUS_LABEL, TYPE_BADGE, coverSrc, externalLinks, fmtPrice, progressPct } from "../utils.js";
+import { loadImageSize } from "../api.js";
 import { useApp } from "../store.jsx";
 import Cover from "./Cover.jsx";
 import { IconMemo } from "./Icons.jsx";
@@ -15,6 +16,39 @@ export default function PulloutPanel({ item }) {
       ref.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [item && item.id]);
+
+  /* 表表紙をその自然な比率で表示する（ItemDetailModal と同じ方式）。
+     128px×182px（モバイル 96px×136px）以内に収める。寸法は表示時に画像から
+     読み取るため、既存の蔵書の画像（リンク画像を含む）にも同じように適用される。
+     画像がない・読めない場合は従来の固定サイズのまま */
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(max-width: 560px)").matches
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const mq = window.matchMedia("(max-width: 560px)");
+    const onChange = () => setIsNarrow(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const [coverRatio, setCoverRatio] = useState(null);
+  const coverSrcValue = item ? coverSrc(item) : "";
+  useEffect(() => {
+    let cancelled = false;
+    setCoverRatio(null);
+    if (!coverSrcValue) return undefined;
+    loadImageSize(coverSrcValue)
+      .then((s) => { if (!cancelled && s) setCoverRatio(s.width / s.height); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [coverSrcValue]);
+  const maxW = isNarrow ? 96 : 128;
+  const maxH = isNarrow ? 136 : 182;
+  const coverBox = coverRatio
+    ? (coverRatio >= maxW / maxH
+      ? { width: maxW, height: Math.round(maxW / coverRatio) }
+      : { width: Math.round(maxH * coverRatio), height: maxH })
+    : null;
 
   if (!item) return null;
   const pct = progressPct(item);
@@ -34,7 +68,10 @@ export default function PulloutPanel({ item }) {
   return (
     <div className="pullout" ref={ref} key={item.id}>
       <div className="pullout-body">
-        <div className="pullout-cover-wrap">
+        <div
+          className={`pullout-cover-wrap${coverBox ? " pullout-cover-natural" : ""}`}
+          style={coverBox ? { flexBasis: coverBox.width, width: coverBox.width, height: coverBox.height } : undefined}
+        >
           <Cover item={item} className="pullout-cover" />
         </div>
         <div className="pullout-main">

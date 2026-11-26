@@ -184,6 +184,9 @@ export function externalLinks(item) {
       return [
         { label: "Spotify で探す", href: `https://open.spotify.com/search/${q}` },
         { label: "Amazon Music で探す", href: `https://music.amazon.co.jp/search/${q}` },
+        { label: "Apple Music で探す", href: `https://music.apple.com/jp/search?term=${q}` },
+        { label: "YouTube Music で探す", href: `https://music.youtube.com/search?q=${q}` },
+        { label: "LINE MUSIC で探す", href: `https://music.line.me/webapp/search?query=${q}` },
       ];
     case "book":
       return [

@@ -567,6 +567,8 @@ label input, label select { margin-top: 4px; }
   animation: pullout-cover-in 520ms var(--ease-emphasis);
 }
 .cover-generated.pullout-cover { height: 182px; overflow: hidden; }
+/* 表表紙を自然な比率で表示する（幅・高さはインラインスタイルで指定） */
+.pullout-cover-wrap.pullout-cover-natural .pullout-cover { width: 100%; height: 100%; aspect-ratio: auto; }
 @keyframes pullout-cover-in {
   from { transform: rotateY(68deg) translateX(-16px); opacity: 0.4; }
   to { transform: rotateY(0deg) translateX(0); opacity: 1; }
