@@ -7,24 +7,46 @@ export default function Spine({ item, selected, onSelect }) {
   const base = spineSize(item);
   const src = spineSrc(item);
   const [imgFailed, setImgFailed] = useState(false);
-  /* 棚に表示する画像（背表紙 → 表表紙 → 裏表紙 → 外部表紙）の自然な縦横比で幅を決める。
-     高さは spineSize（判型・手動の高さ・CD上限を反映）の高さ、幅＝高さ×（画像幅／画像高さ）で 24〜96px に収める。
-     寸法は表示時に画像から読み取るため、既存の蔵書の画像（新しく登録したもの以外）にも同じように適用される。
+  /* 比率は背表紙（spine_key）が登録されている場合にだけ読み、読み取る画像も背表紙のURLを直接指定する。
+     背表紙未登録の場合は横幅は従来通り spineSize の幅（ハッシュによるランダムな幅）のまま。
+     画像自体は従来通り spineSrc（背表紙 → 表表紙 → 裏表紙 → 外部表紙）で表示する。
+     高さは常に spineSize から決める（背表紙の有無で変えない）。
+     幅＝高さ×比率をそのまま使い、下限・上限のクランプはつけない。
+     EP・シングルのさらに薄い背や薄い本の真の比率を出すため（0px になる退行だけ 1px で防ぐ）。
      画像がない・読めない場合は従来の固定サイズのまま */
+  const spineUrl = item.spine_key ? `/api/images/${encodeURIComponent(item.spine_key)}` : "";
   const [spineRatio, setSpineRatio] = useState(null);
   useEffect(() => {
     let cancelled = false;
     setSpineRatio(null);
-    if (!src) return undefined;
-    loadImageSize(src)
-      .then((s) => { if (!cancelled && s) setSpineRatio(s.width / s.height); })
+    if (!spineUrl) return undefined;
+    let timer = null;
+    loadImageSize(spineUrl)
+      .then((s) => {
+        if (cancelled) return;
+        if (s) { setSpineRatio(s.width / s.height); return; }
+        // 読み取りに失敗したら800ms後に1回だけ再試行する
+        timer = setTimeout(() => {
+          loadImageSize(spineUrl)
+            .then((s2) => { if (!cancelled && s2) setSpineRatio(s2.width / s2.height); })
+            .catch(() => {});
+        }, 800);
+      })
       .catch(() => {});
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [src]);
-  const width = spineRatio
-    ? Math.max(24, Math.min(96, Math.round(base.height * spineRatio)))
-    : base.width;
+  }, [spineUrl]);
+  /* フォールバック：実際に表示された背表紙の画像から比率を取る。
+     別経路の読み取りが失敗しても、表示中の画像から確実に比率が付く。
+     spine_key がある場合、表示画像は背表紙そのものなのでこの比率が正しい */
+  const handleImgLoad = (e) => {
+    if (!spineUrl) return;
+    const im = e.target;
+    if (im && im.naturalWidth && im.naturalHeight) {
+      setSpineRatio(im.naturalWidth / im.naturalHeight);
+    }
+  };
+  const width = spineRatio ? Math.max(1, Math.round(base.height * spineRatio)) : base.width;
   const height = base.height;
   const pct = progressPct(item);
   const color = spineColor(item);
@@ -40,7 +62,7 @@ export default function Spine({ item, selected, onSelect }) {
       title={item.title}
     >
       {showImg ? (
-        <AuthedImage className="spine-cover" src={src} alt="" loading="lazy" onError={() => setImgFailed(true)} />
+        <AuthedImage className="spine-cover" src={src} alt="" loading="lazy" onError={() => setImgFailed(true)} onLoad={handleImgLoad} />
       ) : (
         <>
           <span className="spine-band spine-band-top" />
