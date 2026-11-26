@@ -3,13 +3,43 @@ import { STATUS_LABEL, TYPE_BADGE, coverSrc, spineColor } from "../utils.js";
 import { useApp } from "../store.jsx";
 import AuthedImage from "./AuthedImage.jsx";
 
-export default function ListRow({ item }) {
+/* 1件分のカード行。クリックで詳細を開く。
+   selectable の場合は左端にチェックボックスを出し、フォルダへの一括追加などで使う。
+   チェックボックスの操作では詳細を開かず、トグルのみ行う。
+   外側は <div role="button">（<button> の中にチェックボックスは置けないため。
+   Enter／Space キーで詳細を開くキーボード操作は維持する） */
+export default function ListRow({ item, selectable, checked, onToggle }) {
   const { openDetail } = useApp();
   const src = coverSrc(item);
   const [failed, setFailed] = useState(false);
 
+  const handleKeyDown = (e) => {
+    /* チェックボックスにフォーカスがある場合は行のキー操作をしない */
+    if (e.target && e.target.tagName === "INPUT") return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openDetail(item.id);
+    }
+  };
+
   return (
-    <button className="list-row" onClick={() => openDetail(item.id)}>
+    <div
+      className={`list-row${checked ? " list-row-selected" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => openDetail(item.id)}
+      onKeyDown={handleKeyDown}
+    >
+      {selectable && (
+        <input
+          type="checkbox"
+          className="list-check"
+          checked={!!checked}
+          aria-label={`${item.title}を選択`}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => { e.stopPropagation(); if (onToggle) onToggle(item.id, e.target.checked); }}
+        />
+      )}
       {src && !failed ? (
         <AuthedImage className="list-thumb" src={src} alt="" loading="lazy" onError={() => setFailed(true)} />
       ) : (
@@ -32,6 +62,6 @@ export default function ListRow({ item }) {
         )}
         <span className="badge badge-muted">メモ {item.memo_count || 0}</span>
       </span>
-    </button>
+    </div>
   );
 }

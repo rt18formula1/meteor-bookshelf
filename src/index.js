@@ -286,6 +286,64 @@ async function reorderItems(request, env, user) {
   return json({ ok: true, count: n });
 }
 
+/* 複数アイテムを1つのフォルダへ一括追加する。body { ids: [...], folder_id }。
+   既存のフォルダ割り当ては残し、指定フォルダだけ追加する（INSERT OR IGNORE）。
+   互換用の items.folder_id が NULL の場合のみ先頭フォルダで補完する */
+async function bulkAddToFolder(request, env, user, ctx) {
+  const { ids, folder_id } = await request.json().catch(() => ({}));
+  const folderIds = await resolveFolderIds(env, user, [folder_id]);
+  if (!folderIds.length) return err("フォルダが見つかりません", 404);
+  const target = folderIds[0];
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 1000) return err("アイテムのリストが不正です");
+  const clean = [...new Set(ids.map((v) => parseInt(v)).filter((v) => Number.isInteger(v) && v > 0))];
+  if (!clean.length) return err("アイテムのリストが不正です");
+  /* 自分のアイテムであることを確認（他人の id は無視） */
+  const placeholders = clean.map(() => "?").join(",");
+  const mine = await env.DB.prepare(`SELECT id, folder_id FROM items WHERE user_id = ? AND id IN (${placeholders})`).bind(user.id, ...clean).all();
+  const mineRows = mine.results || [];
+  if (!mineRows.length) return json({ updated: 0, already: 0 });
+  const mineIds = mineRows.map((r) => r.id);
+  const minePlaceholders = mineIds.map(() => "?").join(",");
+  const alreadyRows = await env.DB.prepare(
+    `SELECT item_id FROM item_folders WHERE folder_id = ? AND item_id IN (${minePlaceholders})`
+  ).bind(target, ...mineIds).all();
+  const alreadySet = new Set((alreadyRows.results || []).map((r) => r.item_id));
+  const toAdd = mineRows.filter((r) => !alreadySet.has(r.id));
+  if (toAdd.length) {
+    const stmts = toAdd.map((r) =>
+      env.DB.prepare("INSERT OR IGNORE INTO item_folders (item_id, folder_id) VALUES (?, ?)").bind(r.id, target));
+    await env.DB.batch(stmts);
+    /* 互換用の items.folder_id が NULL のものだけ先頭フォルダで補完する */
+    const nullFolder = toAdd.filter((r) => r.folder_id == null);
+    if (nullFolder.length) {
+      const nstmts = nullFolder.map((r) =>
+        env.DB.prepare("UPDATE items SET folder_id = ? WHERE id = ? AND user_id = ?").bind(target, r.id, user.id));
+      await env.DB.batch(nstmts);
+    }
+  }
+  /* Notion 同期は更新分だけ（updateItem と同じく waitUntil。Notion 未設定時は no-op） */
+  if (ctx && toAdd.length) {
+    const updIds = toAdd.map((r) => r.id);
+    const updPlaceholders = updIds.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT ${ITEM_COLS}, (SELECT COUNT(*) FROM memos m WHERE m.item_id = items.id) AS memo_count FROM items WHERE user_id = ? AND id IN (${updPlaceholders})`
+    ).bind(user.id, ...updIds).all();
+    const folderRows = await env.DB.prepare(
+      `SELECT item_id, folder_id FROM item_folders WHERE item_id IN (${updPlaceholders})`
+    ).bind(...updIds).all();
+    const folderMap = new Map();
+    for (const fr of folderRows.results || []) {
+      if (!folderMap.has(fr.item_id)) folderMap.set(fr.item_id, []);
+      folderMap.get(fr.item_id).push(fr.folder_id);
+    }
+    for (const it of rows.results || []) {
+      it.folder_ids = folderMap.get(it.id) || [];
+      ctx.waitUntil(syncToNotion(env, user, it, "update", new URL(request.url).origin));
+    }
+  }
+  return json({ updated: toAdd.length, already: alreadySet.size });
+}
+
 /* 保有場所・カテゴリーの候補一覧（自分のアイテムから重複なし・空除く・昇順） */
 async function listLabels(env, user) {
   const locs = await env.DB.prepare("SELECT DISTINCT location FROM items WHERE user_id = ? AND location != '' ORDER BY location ASC").bind(user.id).all();
@@ -1848,6 +1906,7 @@ export default {
           return syncAllToNotion(request, env, user);
         }
         if (path === "/api/items/reorder" && request.method === "PUT") return reorderItems(request, env, user);
+        if (path === "/api/items/bulk-folders" && request.method === "POST") return bulkAddToFolder(request, env, user, ctx);
         if (path === "/api/folders" && request.method === "GET") return listFolders(env, user);
         if (path === "/api/folders" && request.method === "POST") return createFolder(request, env, user);
         if (path === "/api/folders/reorder" && request.method === "PUT") return reorderFolders(request, env, user);

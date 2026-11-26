@@ -5,6 +5,8 @@ import { TYPE_FILTERS, coverSrc, spineColor } from "../utils.js";
 import Shelf, { EmptyShelf } from "../components/Shelf.jsx";
 import PulloutPanel from "../components/PulloutPanel.jsx";
 import ListRow from "../components/ListRow.jsx";
+import BulkBar from "../components/BulkBar.jsx";
+import BulkFolderModal from "../components/BulkFolderModal.jsx";
 import AuthedImage from "../components/AuthedImage.jsx";
 import FolderManagerModal from "../components/FolderManagerModal.jsx";
 import ShareModal from "../components/ShareModal.jsx";
@@ -23,7 +25,7 @@ const SORT_OPTIONS = [
 ];
 
 export default function HomeView({ viewMode, setViewMode }) {
-  const { toast, itemsVersion, foldersVersion, setView, setTotalCount, bumpItems } = useApp();
+  const { toast, itemsVersion, foldersVersion, setView, setTotalCount, bumpItems, bumpFolders } = useApp();
   const [homeType, setHomeType] = useState("");
   const [folder, setFolder] = useState(""); // ""=すべて, "none"=未分類, フォルダID（文字列）=そのフォルダ
   const [folders, setFolders] = useState([]);
@@ -38,6 +40,9 @@ export default function HomeView({ viewMode, setViewMode }) {
   const [sort, setSort] = useState("manual");
   const [category, setCategory] = useState("");
   const [categories, setCategories] = useState([]);
+  /* 一括追加の選択状態（リスト表示用。ホームビュー内で独立） */
+  const [selected, setSelected] = useState(() => new Set());
+  const [showBulk, setShowBulk] = useState(false);
   /* 編集モード（並べ替え） */
   const [editing, setEditing] = useState(false);
   const [editItems, setEditItems] = useState([]);
@@ -120,6 +125,35 @@ export default function HomeView({ viewMode, setViewMode }) {
   const loadMore = useCallback(() => {
     if (hasMore) load(false);
   }, [hasMore, load]);
+
+  /* ---- 一括追加の選択 ---- */
+  const toggleSelect = (id, checked) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+  /* 表示から消えたアイテムの選択は解除する（フィルター変更・追加後の再読み込み時など） */
+  useEffect(() => {
+    const visible = new Set(items.map((r) => r.id));
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [items]);
+  const handleBulkDone = (data, folderName) => {
+    setShowBulk(false);
+    setSelected(new Set());
+    if (data.updated > 0) {
+      toast(`${data.updated}件を「${folderName}」に追加しました${data.already > 0 ? `（${data.already}件はすでに入っていました）` : ""}`);
+    } else {
+      toast(`すべて「${folderName}」にすでに入っています`);
+    }
+    bumpItems();
+    bumpFolders();
+  };
 
   /* ---- 編集モード（並べ替え） ---- */
   const startEdit = async () => {
@@ -340,9 +374,20 @@ export default function HomeView({ viewMode, setViewMode }) {
         )
       ) : (
         <div>
+          <BulkBar
+            count={selected.size}
+            onAddToFolder={() => setShowBulk(true)}
+            onClear={() => setSelected(new Set())}
+          />
           <div className="item-list">
             {items.map((item) => (
-              <ListRow key={item.id} item={item} />
+              <ListRow
+                key={item.id}
+                item={item}
+                selectable
+                checked={selected.has(item.id)}
+                onToggle={toggleSelect}
+              />
             ))}
             {items.length === 0 && <p className="empty-text">まだ何も登録されていません。</p>}
           </div>
@@ -352,6 +397,14 @@ export default function HomeView({ viewMode, setViewMode }) {
         </div>
       )}
 
+      {showBulk && (
+        <BulkFolderModal
+          ids={[...selected]}
+          onClose={() => setShowBulk(false)}
+          onDone={handleBulkDone}
+          onOpenManager={() => setShowFolderManager(true)}
+        />
+      )}
       {showFolderManager && <FolderManagerModal onClose={() => setShowFolderManager(false)} />}
       {showShare && <ShareModal folder={selectedFolder} onClose={() => setShowShare(false)} />}
     </section>

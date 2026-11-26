@@ -3,16 +3,23 @@ import { api, downloadCsv } from "../api.js";
 import { useApp } from "../store.jsx";
 import { TYPE_FILTERS } from "../utils.js";
 import ListRow from "../components/ListRow.jsx";
+import BulkBar from "../components/BulkBar.jsx";
+import BulkFolderModal from "../components/BulkFolderModal.jsx";
+import FolderManagerModal from "../components/FolderManagerModal.jsx";
 import { IconDownload } from "../components/Icons.jsx";
 
 export default function SearchView() {
-  const { toast, itemsVersion } = useApp();
+  const { toast, itemsVersion, bumpItems, bumpFolders } = useApp();
   const [q, setQ] = useState("");
   const [type, setType] = useState("");
   const [unread, setUnread] = useState(false);
   const [memoOnly, setMemoOnly] = useState(false);
   const [results, setResults] = useState([]);
   const [searched, setSearched] = useState(false);
+  /* 一括追加の選択状態（検索ビュー内で独立） */
+  const [selected, setSelected] = useState(() => new Set());
+  const [showBulk, setShowBulk] = useState(false);
+  const [showFolderManager, setShowFolderManager] = useState(false);
   const timer = useRef(null);
 
   const filterParams = () => {
@@ -49,6 +56,35 @@ export default function SearchView() {
     }
   };
 
+  /* 選択のトグル。表示から消えたアイテムの選択は解除する */
+  const toggleSelect = (id, checked) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+  useEffect(() => {
+    const visible = new Set(results.map((r) => r.id));
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [results]);
+
+  const handleBulkDone = (data, folderName) => {
+    setShowBulk(false);
+    setSelected(new Set());
+    if (data.updated > 0) {
+      toast(`${data.updated}件を「${folderName}」に追加しました${data.already > 0 ? `（${data.already}件はすでに入っていました）` : ""}`);
+    } else {
+      toast(`すべて「${folderName}」にすでに入っています`);
+    }
+    bumpItems();
+    bumpFolders();
+  };
+
   return (
     <section className="view">
       <h2 className="view-title">検索</h2>
@@ -83,12 +119,32 @@ export default function SearchView() {
           <IconDownload size={15} /> この検索結果をCSVでダウンロード
         </button>
       </div>
+      <BulkBar
+        count={selected.size}
+        onAddToFolder={() => setShowBulk(true)}
+        onClear={() => setSelected(new Set())}
+      />
       <div className="item-list">
         {results.map((item) => (
-          <ListRow key={item.id} item={item} />
+          <ListRow
+            key={item.id}
+            item={item}
+            selectable
+            checked={selected.has(item.id)}
+            onToggle={toggleSelect}
+          />
         ))}
         {searched && results.length === 0 && <p className="empty-text">見つかりませんでした。</p>}
       </div>
+      {showBulk && (
+        <BulkFolderModal
+          ids={[...selected]}
+          onClose={() => setShowBulk(false)}
+          onDone={handleBulkDone}
+          onOpenManager={() => setShowFolderManager(true)}
+        />
+      )}
+      {showFolderManager && <FolderManagerModal onClose={() => setShowFolderManager(false)} />}
     </section>
   );
 }

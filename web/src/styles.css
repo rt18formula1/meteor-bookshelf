@@ -717,6 +717,32 @@ label input, label select { margin-top: 4px; }
 .list-sub { font-size: 13px; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-catno { font-size: 11px; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-meta { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; }
+.list-row-selected { border-color: var(--primary); background: rgba(184, 98, 10, 0.07); }
+.list-check { flex: 0 0 auto; width: 20px; height: 20px; cursor: pointer; accent-color: var(--primary); }
+
+/* 一括選択（一覧の上部に sticky 表示） */
+.bulk-bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; gap: 8px; align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-md);
+  padding: 8px 12px; margin-bottom: 8px;
+  box-shadow: var(--shadow-md);
+}
+.bulk-bar-count { flex: 1; font-weight: 600; }
+
+/* フォルダ選択モーダル（一括追加） */
+.bulk-folder-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.bulk-folder-row {
+  display: flex; gap: 10px; align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #e3d7c9; border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.bulk-folder-row-selected { border-color: var(--primary); background: rgba(184, 98, 10, 0.07); }
+.bulk-folder-row input { width: auto; }
+.bulk-folder-name { flex: 1; font-weight: 600; }
 
 /* cards */
 .card {
