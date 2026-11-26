@@ -192,7 +192,8 @@ export function externalLinks(item) {
       return [
         { label: "Kindle で探す", href: `https://www.amazon.co.jp/s?k=${encodeURIComponent([item.title, item.creator].filter(Boolean).join(" "))}&i=digital-text` },
         { label: "Amazon で探す", href: `https://www.amazon.co.jp/s?k=${encodeURIComponent(item.isbn || item.title || "")}` },
-        { label: "Rakuten VALUEBOOKS で探す", href: `https://www.valuebooks.jp/search?keyword=${encodeURIComponent(item.isbn || item.title || "")}` },
+        { label: "楽天ブックス で探す", href: `https://books.rakuten.co.jp/search?sitem=${encodeURIComponent(item.isbn || item.title || "")}` },
+        { label: "VALUEBOOKS で探す", href: `https://www.valuebooks.jp/search?keyword=${encodeURIComponent(item.isbn || item.title || "")}` },
       ];
     case "dvd":
       return [
@@ -202,7 +203,8 @@ export function externalLinks(item) {
       /* 雑誌はJANコード（491始まり）であってISBNではないため、VALUEBOOKSは雑誌名で検索する */
       return [
         { label: "Amazon で探す", href: `https://www.amazon.co.jp/s?k=${titleQ}` },
-        { label: "Rakuten VALUEBOOKS で探す", href: `https://www.valuebooks.jp/search?keyword=${encodeURIComponent(item.title || "")}` },
+        { label: "楽天ブックス で探す", href: `https://books.rakuten.co.jp/search?sitem=${encodeURIComponent(item.title || "")}` },
+        { label: "VALUEBOOKS で探す", href: `https://www.valuebooks.jp/search?keyword=${encodeURIComponent(item.title || "")}` },
       ];
     default:
       return [
