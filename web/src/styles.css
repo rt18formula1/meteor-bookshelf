@@ -116,7 +116,7 @@ label input, label select { margin-top: 4px; }
 }
 .badge-muted { background: rgba(122, 90, 58, 0.1); color: var(--fg-muted); }
 .badge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-.chips { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 12px; scrollbar-width: none; }
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 12px; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%); mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%); }
 .chips::-webkit-scrollbar { display: none; }
 .chip {
   flex: 0 0 auto;
@@ -604,7 +604,7 @@ label input, label select { margin-top: 4px; }
 .controls-row select {
   padding: 8px 10px; border-radius: var(--radius-full);
   border: 1px solid var(--divider); background: var(--surface);
-  font-size: 13.5px; color: var(--fg);
+  font-size: 13.5px; color: var(--fg); max-width: 100%;
 }
 .controls-row .controls-spacer { flex: 1; }
 
@@ -876,6 +876,11 @@ label input, label select { margin-top: 4px; }
   .shelf-scroller { padding: 30px 8px 0; gap: 4px; min-height: 252px; }
   .pills-row { flex-direction: column; gap: 2px; }
   .pills-row .view-toggle { align-self: flex-end; margin-top: 0; }
+  .chips-dark .chip-dark { padding: 8px 14px; font-size: 13.5px; gap: 6px; }
+  .chips-dark .chip-dark .chip-count { font-size: 12.5px; }
+  .controls-row select { flex: 1 1 140px; min-width: 0; }
+  .controls-row .controls-spacer { display: none; }
+  .controls-row .btn-small { margin-left: auto; }
   .pullout { padding: 18px; }
   .card-title { font-size: 26px; }
   .card-pct { font-size: 22px; }

@@ -1,9 +1,10 @@
 /* 共有カード（PNG）と共有PDFの生成。すべてクライアント側で行う。
    日本語は Canvas に描画して画像化するため、フォントの問題が出ない。
    表紙画像は取得できない場合があるため、取得失敗時は色タイル＋頭文字で代替表示する
-   （Canvas が汚染されると toBlob が使えなくなるため、取得失敗した画像は描画しない）。 */
+   （Canvas が汚染されると toBlob が使えなくなるため、取得失敗した画像は描画しない）。
+   PDF の文字はすべて Canvas 内に描く。jsPDF の doc.text は日本語を扱えず文字化けするため使わない。 */
 import { apiImageObjectUrl } from "./api.js";
-import { spineColor, spineTextColor, fmtPrice } from "./utils.js";
+import { spineColor, spineTextColor } from "./utils.js";
 
 /* JST の日時スタンプ（ファイル名用） */
 function jstStamp() {
@@ -56,6 +57,14 @@ async function loadCoverImage(item) {
   }
 }
 
+/* 複数アイテムの表紙を並行して読み込む。結果は items と同じ順序・長さ（失敗時は null） */
+async function loadCovers(items) {
+  return Promise.all(items.map((item) => loadCoverImage(item)));
+}
+function revokeCovers(covers) {
+  for (const c of covers) if (c && c.objectUrl) URL.revokeObjectURL(c.objectUrl);
+}
+
 /* テキストを指定幅で折り返す（Canvas 用。日本語は1文字ずつ送る） */
 function wrapText(ctx, text, maxWidth) {
   const lines = [];
@@ -96,15 +105,51 @@ function drawTitleTile(ctx, item, x, y, w, h) {
   ctx.fillText((item.title || "?").slice(0, 1), x + w / 2, y + h / 2 + w * 0.04);
 }
 
-/* 共有カード（1080×1080）を描く。items は最大9枚まで表紙グリッドに使う */
+/* 表紙セルを描く（正方形・cover-fit、取得失敗時は色タイル）。タイトルは描かない */
+function drawCoverCell(ctx, item, loaded, x, y, size) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, size, size);
+  ctx.clip();
+  if (loaded) drawCoverFit(ctx, loaded.img, x, y, size, size);
+  else drawTitleTile(ctx, item, x, y, size, size);
+  ctx.restore();
+  ctx.strokeStyle = "rgba(45,26,8,0.12)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, size, size);
+}
+
+/* セルのタイトルを中央揃えで描く（最大 maxLines 行、はみ出す分は省略） */
+function drawCellTitle(ctx, title, cx, topY, maxWidth, fontPx, lineHeight, maxLines = 2) {
+  const text = String(title || "").trim();
+  if (!text) return;
+  ctx.save();
+  ctx.font = `600 ${fontPx}px "Noto Sans JP", sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "#2d1a08";
+  const lines = wrapText(ctx, text, maxWidth).slice(0, maxLines);
+  lines.forEach((line, i) => ctx.fillText(line, cx, topY + i * lineHeight));
+  ctx.restore();
+}
+
+/* 共有カード（1080×1080）を描く。5列×4行＝最大20件。
+   高さの予算（すべて固定値で、フォルダ名の行数に依存しないためはみ出さない）：
+     ブランド帯 0-10 / ブランド見出し baseline 84
+     フォルダ名 52px・行間62 baseline 148・212（1行のときは中央の179）
+     冊数 baseline 258 / グリッド 284-992（708）/ フッター baseline 1032
+   グリッド：余白56・間隔12、セル幅184 = (1080-56*2-12*4)/5
+     行高168 = 表紙110＋間隔6＋タイトル22px×2行（行間26＝52）
+     284 + 4*168 + 3*12 = 992。フッター1032。すべて1080以内に収まる。 */
 export async function renderShareCard({ title, subtitle, items }) {
   const W = 1080;
   const H = 1080;
+  const M = 56;
   const canvas = document.createElement("canvas");
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext("2d");
-  const list = (items || []).slice(0, 9);
+  const list = (items || []).slice(0, 20);
 
   /* 背景 */
   ctx.fillStyle = "#fdf6ee";
@@ -112,68 +157,61 @@ export async function renderShareCard({ title, subtitle, items }) {
   /* 上部ブランド帯 */
   ctx.fillStyle = "#b8620a";
   ctx.fillRect(0, 0, W, 10);
-  ctx.fillStyle = "#2d1a08";
+
+  /* ブランド見出し（1行。「私の本棚」と「Bookshelf」の間は28pxの固定ギャップ） */
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
-  ctx.font = `600 34px "Noto Sans JP", sans-serif`;
-  ctx.fillText("私の本棚", 64, 92);
-  ctx.fillStyle = "#7a5a3a";
-  ctx.font = `400 28px "Noto Sans JP", sans-serif`;
-  ctx.fillText("Bookshelf", 64 + ctx.measureText("私の本棚").width + 18, 92);
-
-  /* フォルダ名（最大2行） */
   ctx.fillStyle = "#2d1a08";
-  ctx.font = `700 64px "Noto Sans JP", sans-serif`;
-  const nameLines = wrapText(ctx, title || "本棚", W - 128).slice(0, 2);
-  nameLines.forEach((line, i) => ctx.fillText(line, 64, 190 + i * 78));
-
-  /* 冊数 */
-  const subY = 190 + nameLines.length * 78 + 8;
+  ctx.font = `700 32px "Noto Sans JP", sans-serif`;
+  const brand = "私の本棚";
+  ctx.fillText(brand, M, 84);
+  const brandW = ctx.measureText(brand).width;
   ctx.fillStyle = "#7a5a3a";
-  ctx.font = `500 36px "Noto Sans JP", sans-serif`;
-  ctx.fillText(subtitle || "", 64, subY);
+  ctx.font = `400 26px "Noto Sans JP", sans-serif`;
+  ctx.fillText("Bookshelf", M + brandW + 28, 84);
 
-  /* 表紙グリッド（3×3） */
-  const gridTop = subY + 48;
-  const gap = 16;
-  const cell = Math.floor((W - 128 - gap * 2) / 3);
-  const gridH = cell * 3 + gap * 2;
-  const covers = [];
-  for (const item of list) {
-    covers.push(await loadCoverImage(item));
-  }
-  for (let i = 0; i < 9; i++) {
-    const r = Math.floor(i / 3);
-    const c = i % 3;
-    const x = 64 + c * (cell + gap);
-    const y = gridTop + r * (cell + gap);
-    const item = list[i];
-    const loaded = covers[i];
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, y, cell, cell);
-    ctx.clip();
-    if (item && loaded) drawCoverFit(ctx, loaded.img, x, y, cell, cell);
-    else if (item) drawTitleTile(ctx, item, x, y, cell, cell);
-    else {
-      ctx.fillStyle = "#f5eee6";
-      ctx.fillRect(x, y, cell, cell);
-    }
-    ctx.restore();
-    /* 枠線 */
-    ctx.strokeStyle = "rgba(45,26,8,0.12)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, cell, cell);
-  }
-  for (const c of covers) {
-    if (c && c.objectUrl) URL.revokeObjectURL(c.objectUrl);
+  /* フォルダ名（最大2行。1行のときは2行分の中央に置く） */
+  ctx.fillStyle = "#2d1a08";
+  ctx.font = `700 52px "Noto Sans JP", sans-serif`;
+  const nameLines = wrapText(ctx, title || "本棚", W - M * 2).slice(0, 2);
+  if (nameLines.length <= 1) {
+    ctx.fillText(nameLines[0] || "本棚", M, 179);
+  } else {
+    nameLines.forEach((line, i) => ctx.fillText(line, M, 148 + i * 62));
   }
 
-  /* フッター */
+  /* 冊数（固定位置） */
+  ctx.fillStyle = "#7a5a3a";
+  ctx.font = `500 30px "Noto Sans JP", sans-serif`;
+  ctx.fillText(subtitle || "", M, 258);
+
+  /* 表紙グリッド（5列×4行＝最大20件） */
+  const COLS = 5;
+  const GAP = 12;
+  const CW = 184;
+  const RH = 168;
+  const CS = 110;
+  const TITLE_FONT = 22;
+  const TITLE_LH = 26;
+  const TITLE_GAP = 6;
+  const GRID_TOP = 284;
+  const covers = await loadCovers(list);
+  for (let i = 0; i < list.length; i++) {
+    const r = Math.floor(i / COLS);
+    const c = i % COLS;
+    const x = M + c * (CW + GAP);
+    const y = GRID_TOP + r * (RH + GAP);
+    const coverX = x + (CW - CS) / 2;
+    drawCoverCell(ctx, list[i], covers[i], coverX, y, CS);
+    drawCellTitle(ctx, list[i].title, x + CW / 2, y + CS + TITLE_GAP, CW, TITLE_FONT, TITLE_LH, 2);
+  }
+  revokeCovers(covers);
+
+  /* フッター（Canvas内に描く） */
   ctx.fillStyle = "#7a5a3a";
   ctx.font = `400 26px "Noto Sans JP", sans-serif`;
   ctx.textAlign = "center";
-  ctx.fillText("私の本棚 — Bookshelf", W / 2, gridTop + gridH + 56);
+  ctx.fillText("私の本棚 — Bookshelf", W / 2, 1032);
   return canvas;
 }
 
@@ -221,63 +259,80 @@ export async function sharePng({ title, subtitle, items, text, url }) {
   return "downloaded";
 }
 
-/* 一覧ページ（A4比率 1240×1754）を描く。rows は1ページ分のアイテム */
-function renderListPage({ title, page, pageCount, rows }) {
+/* グリッドページ（A4比率 1240×1754）を描く。表紙＋タイトルのみ（作者・出版社・価格は出さない）。
+   5列×5行＝25件。ヘッダーにフォルダ名とページ番号、フッターはCanvas内に描く。
+   高さの予算：
+     ブランド帯 0-10 / ヘッダー baseline 104 / 区切り線 134
+     グリッド 164-1622（1458）/ フッター baseline 1690
+   グリッド：余白70・横間隔15、セル幅208 = (1240-70*2-15*4)/5、表紙208
+     行高274 = 表紙208＋間隔8＋タイトル24px×2行（行間29＝58）、行間22
+     164 + 5*274 + 4*22 = 1622。フッター1690。すべて1754以内に収まる。 */
+async function renderGridPage({ title, page, pageCount, rows }) {
   const W = 1240;
   const H = 1754;
+  const M = 70;
   const canvas = document.createElement("canvas");
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext("2d");
+  const list = rows || [];
+
   ctx.fillStyle = "#fdf6ee";
   ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = "#b8620a";
   ctx.fillRect(0, 0, W, 10);
-  ctx.fillStyle = "#2d1a08";
+
+  /* ヘッダー：フォルダ名（1行）＋ページ番号 */
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
-  ctx.font = `700 52px "Noto Sans JP", sans-serif`;
-  const nameLines = wrapText(ctx, title || "本棚", W - 140).slice(0, 1);
-  ctx.fillText(nameLines[0] || "", 70, 110);
+  ctx.fillStyle = "#2d1a08";
+  ctx.font = `700 48px "Noto Sans JP", sans-serif`;
+  const name = wrapText(ctx, title || "本棚", W - M * 2 - 160).slice(0, 1)[0] || "";
+  ctx.fillText(name, M, 104);
   ctx.fillStyle = "#7a5a3a";
-  ctx.font = `400 30px "Noto Sans JP", sans-serif`;
+  ctx.font = `400 28px "Noto Sans JP", sans-serif`;
   ctx.textAlign = "right";
-  ctx.fillText(`${page} / ${pageCount}`, W - 70, 110);
+  ctx.fillText(`${page} / ${pageCount}`, W - M, 104);
   ctx.textAlign = "left";
   ctx.strokeStyle = "rgba(45,26,8,0.2)";
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(70, 140);
-  ctx.lineTo(W - 70, 140);
+  ctx.moveTo(M, 134);
+  ctx.lineTo(W - M, 134);
   ctx.stroke();
 
-  let y = 200;
-  const rowH = 96;
-  for (const item of rows) {
-    ctx.fillStyle = "#2d1a08";
-    ctx.font = `600 34px "Noto Sans JP", sans-serif`;
-    const t = wrapText(ctx, item.title || "", W - 140).slice(0, 1)[0] || "";
-    ctx.fillText(t, 70, y + 38);
-    const sub = [item.creator, item.publisher, fmtPrice(item.price)].filter(Boolean).join(" ／ ");
-    ctx.fillStyle = "#7a5a3a";
-    ctx.font = `400 28px "Noto Sans JP", sans-serif`;
-    ctx.fillText(sub.slice(0, 60), 70, y + 78);
-    ctx.strokeStyle = "rgba(45,26,8,0.12)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(70, y + rowH - 8);
-    ctx.lineTo(W - 70, y + rowH - 8);
-    ctx.stroke();
-    y += rowH;
+  /* グリッド（5列×5行＝25件） */
+  const COLS = 5;
+  const GAP_X = 15;
+  const GAP_Y = 22;
+  const CW = 208;
+  const CS = 208;
+  const RH = 274;
+  const TITLE_FONT = 24;
+  const TITLE_LH = 29;
+  const TITLE_GAP = 8;
+  const GRID_TOP = 164;
+  const covers = await loadCovers(list);
+  for (let i = 0; i < list.length; i++) {
+    const r = Math.floor(i / COLS);
+    const c = i % COLS;
+    const x = M + c * (CW + GAP_X);
+    const y = GRID_TOP + r * (RH + GAP_Y);
+    drawCoverCell(ctx, list[i], covers[i], x, y, CS);
+    drawCellTitle(ctx, list[i].title, x + CW / 2, y + CS + TITLE_GAP, CW, TITLE_FONT, TITLE_LH, 2);
   }
+  revokeCovers(covers);
+
+  /* フッター（Canvas内に描く） */
   ctx.fillStyle = "#7a5a3a";
   ctx.font = `400 24px "Noto Sans JP", sans-serif`;
   ctx.textAlign = "center";
-  ctx.fillText("私の本棚 — Bookshelf", W / 2, H - 40);
+  ctx.fillText("私の本棚 — Bookshelf", W / 2, 1690);
   return canvas;
 }
 
-/* 共有PDFをダウンロードする。1ページ目に共有カード、続くページにアイテム一覧（最大500件） */
+/* 共有PDFをダウンロードする。1ページ目に共有カード、続くページに表紙＋タイトルのグリッド（最大500件）。
+   日本語テキストはすべてCanvas内に描く（jsPDF の doc.text は日本語を扱えず文字化けするため使わない）。 */
 export async function downloadSharePdf({ title, subtitle, items }) {
   const list = (items || []).slice(0, 500);
   const { jsPDF } = await import("jspdf");
@@ -285,14 +340,12 @@ export async function downloadSharePdf({ title, subtitle, items }) {
   const card = await renderShareCard({ title, subtitle, items: list });
   const cardUrl = card.toDataURL("image/png");
   doc.addImage(cardUrl, "PNG", 0, 0, 210, 210);
-  doc.setFontSize(11);
-  doc.text("私の本棚 — Bookshelf", 105, 222, { align: "center" });
-  const perPage = 15;
-  const pageCount = Math.max(1, Math.ceil(list.length / perPage));
+  const perPage = 25;
+  const pageCount = Math.ceil(list.length / perPage);
   for (let p = 0; p < pageCount; p++) {
     doc.addPage();
     const rows = list.slice(p * perPage, (p + 1) * perPage);
-    const pageCanvas = renderListPage({ title, page: p + 1, pageCount, rows });
+    const pageCanvas = await renderGridPage({ title, page: p + 1, pageCount, rows });
     const url = pageCanvas.toDataURL("image/png");
     doc.addImage(url, "PNG", 0, 0, 210, 297);
   }
