@@ -133,7 +133,7 @@ export default function AdminView() {
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "16px 14px 48px" }}>
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0 }}>管理画面 — 私の本棚</h2>
+        <h2 style={{ margin: 0 }}>管理画面 — わたしの本棚の手帖</h2>
         <a href="/" className="btn-secondary" style={{ textDecoration: "none" }}>アプリに戻る</a>
       </header>
       <p className="muted small">ログイン中: {user ? user.email : ""}</p>

@@ -240,12 +240,12 @@ export async function renderShareCard({ title, subtitle, items }) {
   ctx.fillStyle = "#b8620a";
   ctx.fillRect(0, 0, W, 10);
 
-  /* ブランド見出し（1行。「私の本棚」と「Bookshelf」の間は28pxの固定ギャップ） */
+  /* ブランド見出し（1行。「わたしの本棚の手帖」と「Bookshelf」の間は28pxの固定ギャップ） */
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "#2d1a08";
   ctx.font = `700 32px "Noto Sans JP", sans-serif`;
-  const brand = "私の本棚";
+  const brand = "わたしの本棚の手帖";
   ctx.fillText(brand, M, 84);
   const brandW = ctx.measureText(brand).width;
   ctx.fillStyle = "#7a5a3a";
@@ -280,7 +280,7 @@ export async function renderShareCard({ title, subtitle, items }) {
   ctx.fillStyle = "#7a5a3a";
   ctx.font = `400 26px "Noto Sans JP", sans-serif`;
   ctx.textAlign = "center";
-  ctx.fillText("私の本棚 — Bookshelf", W / 2, 1032);
+  ctx.fillText("わたしの本棚の手帖 — Bookshelf", W / 2, 1032);
   return canvas;
 }
 
@@ -317,7 +317,7 @@ export async function sharePng({ title, subtitle, items, text, url }) {
   const file = new File([blob], filename, { type: "image/png" });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
-      await navigator.share({ files: [file], title: title || "私の本棚", text: text || "", url: url || undefined });
+      await navigator.share({ files: [file], title: title || "わたしの本棚の手帖", text: text || "", url: url || undefined });
       return "shared";
     } catch (e) {
       if (e && e.name === "AbortError") return "cancelled";
@@ -375,7 +375,7 @@ async function renderGridPage({ title, page, pageCount, pageItems, pageCovers, p
   ctx.fillStyle = "#7a5a3a";
   ctx.font = `400 24px "Noto Sans JP", sans-serif`;
   ctx.textAlign = "center";
-  ctx.fillText("私の本棚 — Bookshelf", W / 2, 1690);
+  ctx.fillText("わたしの本棚の手帖 — Bookshelf", W / 2, 1690);
   return canvas;
 }
 

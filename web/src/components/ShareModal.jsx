@@ -5,7 +5,7 @@ import { useApp } from "../store.jsx";
 import { downloadSharePdf, downloadSharePng, sharePng } from "../shareExport.js";
 
 /* 投稿テンプレの既定値。{name}=フォルダ名または「本棚全体」、{count}=冊数、{url}=公開URL */
-const DEFAULT_TEMPLATE = "📚 私の本棚「{name}」に {count} 冊！\n{url}\n#私の本棚 #読書記録";
+const DEFAULT_TEMPLATE = "📚 わたしの本棚の手帖「{name}」に {count} 冊！\n{url}\n#わたしの本棚の手帖 #読書記録";
 
 /* 共有モーダル：フォルダ（または本棚全体）を画像・PDF・リンク・SNSで共有する。
    公開リンクは対象が公開中の場合だけ表示する。非公開の場合はここで公開にできる */
@@ -262,7 +262,7 @@ export default function ShareModal({ folder, onClose }) {
               title: targetName,
               subtitle,
               items,
-              text: `「${targetName}」 ${subtitle} — 私の本棚`,
+              text: `「${targetName}」 ${subtitle} — わたしの本棚の手帖`,
               url: shareUrl || undefined,
             }))}
           >

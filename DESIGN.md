@@ -234,7 +234,7 @@ Background --gesso-secondary (#e8a040), text auto-picked for contrast on seconda
 <meta name="gesso-pipeline" content="direct">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>私の本棚 — Bookshelf</title>
+<title>わたしの本棚の手帖 — Bookshelf</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&amp;family=Noto+Serif+JP:wght@400;500&amp;display=swap" rel="stylesheet">
@@ -634,9 +634,9 @@ svg.ic-2xl, .ic-2xl svg { width: 32px; height: 32px; }
 <header class="head" data-brief-id="header" data-brief-role="header">
   <div class="head-row">
     <div>
-      <p class="kicker">私の本棚 — Bookshelf</p>
+      <p class="kicker">わたしの本棚の手帖 — Bookshelf</p>
       <div class="title-row">
-        <h1>私の本棚</h1>
+        <h1>わたしの本棚の手帖</h1>
         <span class="count">全197点</span>
       </div>
     </div>
@@ -1129,7 +1129,7 @@ svg.ic-2xl, .ic-2xl svg { width: 32px; height: 32px; }
 <meta name="gesso-pipeline" content="direct">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>私の本棚 — Bookshelf</title>
+<title>わたしの本棚の手帖 — Bookshelf</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&amp;family=Noto+Serif+JP:wght@400;500&amp;display=swap" rel="stylesheet">
@@ -1529,9 +1529,9 @@ svg.ic-2xl, .ic-2xl svg { width: 32px; height: 32px; }
 <header class="head" data-brief-id="header" data-brief-role="header">
   <div class="head-row">
     <div>
-      <p class="kicker">私の本棚 — Bookshelf</p>
+      <p class="kicker">わたしの本棚の手帖 — Bookshelf</p>
       <div class="title-row">
-        <h1>私の本棚</h1>
+        <h1>わたしの本棚の手帖</h1>
         <span class="count">全197点</span>
       </div>
     </div>

@@ -498,7 +498,7 @@ export default function SettingsView() {
       )}
       <div className="card">
         <h3>このアプリについて</h3>
-        <p className="muted small">私の本棚 — Bookshelf。書籍・CD・DVD等を木の本棚のメタファーで管理する小規模公開アプリです。書誌情報の取得には OpenBD / Google Books / NDLサーチ / MusicBrainz を利用しています。</p>
+        <p className="muted small">わたしの本棚の手帖 — Bookshelf。書籍・CD・DVD等を木の本棚のメタファーで管理する小規模公開アプリです。書誌情報の取得には OpenBD / Google Books / NDLサーチ / MusicBrainz を利用しています。</p>
         <p className="app-credit">© Meteor Creator Studio</p>
       </div>
     </section>

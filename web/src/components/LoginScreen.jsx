@@ -88,7 +88,7 @@ export default function LoginScreen() {
         <div className="login-body">
           <div className="login-brand">
             <IconBookLogo size={40} />
-            <h1>私の本棚</h1>
+            <h1>わたしの本棚の手帖</h1>
             <p className="muted small">書籍・CD・DVDを木の本棚で管理するアプリです</p>
           </div>
 

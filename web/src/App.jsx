@@ -88,7 +88,7 @@ export default function App() {
           <div className="topbar-inner">
             <div className="brand">
               <IconBookLogo size={24} />
-              <span>私の本棚</span>
+              <span>わたしの本棚の手帖</span>
             </div>
             <div className="topbar-actions">
               <span className="total-count">全{totalCount}点</span>

@@ -251,9 +251,9 @@ export default function HomeView({ viewMode, setViewMode }) {
       <div className="hero">
         <div className="hero-head">
           <div className="hero-titleblock">
-            <p className="hero-eyebrow">私の本棚 — Bookshelf</p>
+            <p className="hero-eyebrow">わたしの本棚の手帖 — Bookshelf</p>
             <div className="hero-titlerow">
-              <h1 className="hero-title">私の本棚</h1>
+              <h1 className="hero-title">わたしの本棚の手帖</h1>
               <span className="hero-count">全{grandTotal}点</span>
             </div>
           </div>

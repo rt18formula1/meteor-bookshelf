@@ -52,7 +52,7 @@ export default function PublicView() {
           <div className="topbar-inner">
             <div className="brand">
               <IconBookLogo size={24} />
-              <span>私の本棚</span>
+              <span>わたしの本棚の手帖</span>
             </div>
           </div>
         </header>
@@ -60,7 +60,7 @@ export default function PublicView() {
           <section className="view">
             <p className="empty-text">{state.error}</p>
             <p className="muted small">共有URLが間違っているか、{isCollection ? "本棚全体" : "フォルダ"}が非公開になっている可能性があります。</p>
-            <a className="btn-secondary btn-small" href="/lp">私の本棚について</a>
+            <a className="btn-secondary btn-small" href="/lp">わたしの本棚の手帖について</a>
           </section>
         </main>
       </div>
@@ -74,7 +74,7 @@ export default function PublicView() {
         <div className="topbar-inner">
           <div className="brand">
             <IconBookLogo size={24} />
-            <span>私の本棚</span>
+            <span>わたしの本棚の手帖</span>
           </div>
           <div className="topbar-actions">
             <a className="btn-secondary btn-small" href="/lp">アプリを見る</a>
@@ -120,7 +120,7 @@ export default function PublicView() {
             </div>
           )}
           <p className="muted small" style={{ marginTop: 24 }}>
-            この本棚は「私の本棚」で作られました。
+            この本棚は「わたしの本棚の手帖」で作られました。
           </p>
         </section>
       </main>

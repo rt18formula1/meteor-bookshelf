@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://meteor-bookshelf.rb18vcarb.workers.dev/sitemap.xml

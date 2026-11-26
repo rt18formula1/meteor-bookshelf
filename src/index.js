@@ -1265,10 +1265,11 @@ async function billingWebhook(request, env) {
 
 /* ---------- Notion API ---------- */
 async function notionApi(token, method, path, body, version) {
-  /* ネットワークが応答しない場合にリクエストを吊るさないためのタイムアウト */
-  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-    ? AbortSignal.timeout(15000)
-    : undefined;
+  /* AbortSignal.timeout は使わない。waitUntil 経由で Notion 同期がリクエスト終了後も
+     続く場合、タイムアウト用のタイマーが元のリクエストに紐づいて残り、
+     handle_cross_request_promise_resolution により「作成したリクエストが終了した
+     promise は解決できない」というサーバーエラーになるため。fetch は
+     Cloudflare の既定のタイムアウトに任せる。 */
   const res = await fetch(`https://api.notion.com/v1${path}`, {
     method,
     headers: {
@@ -1277,7 +1278,6 @@ async function notionApi(token, method, path, body, version) {
       "Content-Type": "application/json",
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -1629,7 +1629,7 @@ async function exportToSheets(request, env, user) {
     }
     if (!spreadsheetId) {
       const created = await sheetsApi(accessToken, "POST", "https://sheets.googleapis.com/v4/spreadsheets", {
-        properties: { title: "私の本棚｜蔵書リスト" },
+        properties: { title: "わたしの本棚の手帖｜蔵書リスト" },
         sheets: [{ properties: { title: "蔵書" } }],
       });
       spreadsheetId = created.spreadsheetId;
@@ -1681,7 +1681,7 @@ async function getPublicCollection(env, shareId) {
      WHERE i.user_id = ? ORDER BY (i.sort_order IS NULL), i.sort_order ASC, i.created_at ASC, i.id ASC LIMIT 500`
   ).bind(user.id).all();
   const items = rows.results || [];
-  return json({ collection: { name: "私の本棚", share_id: shareId, item_count: items.length }, items });
+  return json({ collection: { name: "わたしの本棚の手帖", share_id: shareId, item_count: items.length }, items });
 }
 
 /* 本棚全体の公開設定を取得する（認証必須） */
@@ -1755,13 +1755,23 @@ function escapeHtmlAttr(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/* index.html の静的な SEO タグ（description / canonical / OGP / Twitter Card）を除去する。
+   公開ページではページ固有のタグと差し替えるため */
+function stripStaticSeoTags(html) {
+  return html
+    .replace(/<meta name="description"[^>]*>\n?/g, "")
+    .replace(/<link rel="canonical"[^>]*>\n?/g, "")
+    .replace(/<meta property="og:[^>]*>\n?/g, "")
+    .replace(/<meta name="twitter:[^>]*>\n?/g, "");
+}
+
 /* /s/:shareId の公開ページ。index.html にフォルダに応じた OGP を差し込んで返す。
    非公開・存在しないフォルダの場合は汎用のタイトル・説明にする（React 側で「見つかりません」を表示） */
 async function servePublicPage(request, env, shareId) {
   const origin = new URL(request.url).origin;
   const assetRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url).toString(), { method: "GET" }));
   let html = await assetRes.text();
-  let title = "私の本棚 — Bookshelf";
+  let title = "わたしの本棚の手帖 — Bookshelf";
   let desc = "本棚を共有しています";
   let image = "";
   try {
@@ -1771,7 +1781,7 @@ async function servePublicPage(request, env, shareId) {
         "SELECT COUNT(*) AS c FROM items i WHERE EXISTS (SELECT 1 FROM item_folders f WHERE f.item_id = i.id AND f.folder_id = ?)"
       ).bind(folder.id).first();
       const count = countRow ? countRow.c : 0;
-      title = `${folder.name} — 私の本棚`;
+      title = `${folder.name} — わたしの本棚の手帖`;
       desc = `「${folder.name}」 ${count}点の本棚を共有しています`;
       const imgRow = await env.DB.prepare(
         `SELECT image_key, cover_url FROM items i
@@ -1785,7 +1795,9 @@ async function servePublicPage(request, env, shareId) {
       }
     }
   } catch (_) { /* OGP の取得に失敗してもページ自体は返す */ }
-  const og = buildOgTags({ title, desc, url: `${origin}/s/${shareId}`, image });
+  const jsonLd = { "@context": "https://schema.org", "@type": "WebPage", name: title, description: desc, url: `${origin}/s/${shareId}` };
+  const og = buildOgTags({ title, desc, url: `${origin}/s/${shareId}`, image, jsonLd });
+  html = stripStaticSeoTags(html);
   html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtmlAttr(title)}</title>`);
   html = html.replace("</head>", og + "\n</head>");
   return new Response(html, {
@@ -1794,15 +1806,22 @@ async function servePublicPage(request, env, shareId) {
 }
 
 /* OGP メタタグを組み立てる */
-function buildOgTags({ title, desc, url, image }) {
+function buildOgTags({ title, desc, url, image, jsonLd }) {
   return [
+    `<meta name="description" content="${escapeHtmlAttr(desc)}">`,
+    `<link rel="canonical" href="${escapeHtmlAttr(url)}">`,
     `<meta property="og:type" content="website">`,
-    `<meta property="og:site_name" content="私の本棚">`,
+    `<meta property="og:site_name" content="わたしの本棚の手帖">`,
+    `<meta property="og:locale" content="ja_JP">`,
     `<meta property="og:title" content="${escapeHtmlAttr(title)}">`,
     `<meta property="og:description" content="${escapeHtmlAttr(desc)}">`,
     `<meta property="og:url" content="${escapeHtmlAttr(url)}">`,
     image ? `<meta property="og:image" content="${escapeHtmlAttr(image)}">` : "",
     image ? `<meta name="twitter:card" content="summary_large_image">` : `<meta name="twitter:card" content="summary">`,
+    `<meta name="twitter:title" content="${escapeHtmlAttr(title)}">`,
+    `<meta name="twitter:description" content="${escapeHtmlAttr(desc)}">`,
+    image ? `<meta name="twitter:image" content="${escapeHtmlAttr(image)}">` : "",
+    jsonLd ? `<script type="application/ld+json">${JSON.stringify(jsonLd)}</script>` : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -1812,7 +1831,7 @@ async function servePublicCollectionPage(request, env, shareId) {
   const origin = new URL(request.url).origin;
   const assetRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url).toString(), { method: "GET" }));
   let html = await assetRes.text();
-  let title = "私の本棚 — Bookshelf";
+  let title = "わたしの本棚の手帖 — Bookshelf";
   let desc = "本棚を共有しています";
   let image = "";
   try {
@@ -1820,8 +1839,8 @@ async function servePublicCollectionPage(request, env, shareId) {
     if (user) {
       const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM items WHERE user_id = ?").bind(user.id).first();
       const count = countRow ? countRow.c : 0;
-      title = "私の本棚";
-      desc = `私の本棚 ${count}点を共有しています`;
+      title = "わたしの本棚の手帖";
+      desc = `わたしの本棚の手帖 ${count}点を共有しています`;
       const imgRow = await env.DB.prepare(
         `SELECT image_key, spine_key, side_key, cover_url FROM items
          WHERE user_id = ? AND (image_key != '' OR spine_key != '' OR side_key != '' OR cover_url != '')
@@ -1834,12 +1853,31 @@ async function servePublicCollectionPage(request, env, shareId) {
       }
     }
   } catch (_) { /* OGP の取得に失敗してもページ自体は返す */ }
-  const og = buildOgTags({ title, desc, url: `${origin}/s/all/${shareId}`, image });
+  const jsonLd = { "@context": "https://schema.org", "@type": "CollectionPage", name: title, description: desc, url: `${origin}/s/all/${shareId}` };
+  const og = buildOgTags({ title, desc, url: `${origin}/s/all/${shareId}`, image, jsonLd });
+  html = stripStaticSeoTags(html);
   html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtmlAttr(title)}</title>`);
   html = html.replace("</head>", og + "\n</head>");
   return new Response(html, {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
   });
+}
+
+/* /lp は LP 専用のタイトル・説明・canonical を差し込んで返す（SEO 用） */
+async function serveLpPage(request, env) {
+  const origin = new URL(request.url).origin;
+  const assetRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url).toString(), { method: "GET" }));
+  let html = await assetRes.text();
+  const title = "わたしの本棚の手帖 — 書籍・CD・DVDを木の本棚で管理";
+  const desc = "書籍・CD・DVD・雑誌を木の本棚のメタファーで管理するWebアプリ。バーコード・ISBNスキャンで自動登録、読書や視聴の進捗とメモ、フォルダ分け、公開・共有もできます。基本機能は無料。";
+  const url = `${origin}/lp`;
+  const image = `${origin}/promo-shelf.jpg`;
+  const jsonLd = { "@context": "https://schema.org", "@type": "WebPage", name: "わたしの本棚の手帖", description: desc, url };
+  const og = buildOgTags({ title, desc, url, image, jsonLd });
+  html = stripStaticSeoTags(html);
+  html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtmlAttr(title)}</title>`);
+  html = html.replace("</head>", og + "\n</head>");
+  return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
 /* ---------- router ---------- */
@@ -1867,6 +1905,11 @@ export default {
       if (sm && request.method === "GET") {
         await ensureSchema(env);
         return servePublicPage(request, env, sm[1]);
+      }
+
+      /* /lp は LP 専用のタイトル・説明・canonical を差し込んで返す（SEO 用） */
+      if (path === "/lp" && request.method === "GET") {
+        return serveLpPage(request, env);
       }
 
       /* 公開 API（認証不要）。非公開・存在しないものはハンドラ側で404 */
