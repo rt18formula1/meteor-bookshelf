@@ -161,8 +161,51 @@ async function currentUser(request, env) {
   return { id: res.meta.last_row_id, email, notion_token: "", notion_db_id: "", notion_enabled: 0, sheets_id: "", sheets_url: "", sub_period_end: 0, sub_source: "", stripe_customer_id: "", stripe_subscription_id: "" };
 }
 
+/* ---------- folders ---------- */
+/* フォルダのスキーマ保証。schema.sql が正本（新規DB用）だが、既存DBにも
+   反映されるよう Worker 起動時に CREATE TABLE / ALTER TABLE を実行する。
+   プロセスごとに1回だけ（重複エラーは無視）。 */
+let schemaEnsured = null;
+function ensureSchema(env) {
+  if (!schemaEnsured) {
+    schemaEnsured = (async () => {
+      const stmts = [
+        `CREATE TABLE IF NOT EXISTS folders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id),
+          name TEXT NOT NULL,
+          share_id TEXT NOT NULL UNIQUE,
+          is_public INTEGER NOT NULL DEFAULT 0,
+          sort_order INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )`,
+        "CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id, sort_order)",
+        "CREATE INDEX IF NOT EXISTS idx_folders_share ON folders(share_id)",
+        "CREATE INDEX IF NOT EXISTS idx_items_folder ON items(user_id, folder_id)",
+        "ALTER TABLE items ADD COLUMN folder_id INTEGER",
+      ];
+      for (const sql of stmts) {
+        try { await env.DB.prepare(sql).run(); } catch (_) { /* 既存の列・表・索引はエラーを無視 */ }
+      }
+    })();
+  }
+  return schemaEnsured;
+}
+
+/* 公開URL用の share_id を生成する（15文字、紛らわしい文字を除いた英数字、約87ビット）。
+   フォルダの内部ID（連番）は URL に出さない */
+const SHARE_ID_ALPHABET = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+function generateShareId() {
+  const bytes = new Uint8Array(15);
+  crypto.getRandomValues(bytes);
+  let s = "";
+  for (const b of bytes) s += SHARE_ID_ALPHABET[b % SHARE_ID_ALPHABET.length];
+  return s;
+}
+
 /* ---------- items ---------- */
-const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, cover_url, image_key, spine_key, side_key, sort_order, notion_page_id, status, prog_cur, prog_total, created_at, updated_at";
+const ITEM_COLS = "id, user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, sort_order, notion_page_id, status, prog_cur, prog_total, created_at, updated_at";
 
 /* 並び順: manual=手動（sort_order 昇順、NULL は後ろ）、title / creator / category / new / old / type */
 function sortClause(sort) {
@@ -186,6 +229,7 @@ async function listItems(request, env, user) {
   const sort = u.searchParams.get("sort") || "manual";
   const unread = u.searchParams.get("unread") === "1";
   const withMemo = u.searchParams.get("withMemo") === "1";
+  const folder = (u.searchParams.get("folder") || "").trim();
   const limit = Math.min(parseInt(u.searchParams.get("limit") || "28"), 1000);
   const offset = parseInt(u.searchParams.get("offset") || "0");
   let where = "WHERE user_id = ?";
@@ -193,6 +237,8 @@ async function listItems(request, env, user) {
   if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
   if (type && ["book", "cd", "dvd", "magazine", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
   if (category) { where += " AND category = ?"; binds.push(category); }
+  if (folder === "none") { where += " AND folder_id IS NULL"; }
+  else if (/^\d+$/.test(folder)) { where += " AND folder_id = ?"; binds.push(parseInt(folder)); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
   const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM items ${where}`).bind(...binds).first();
@@ -246,6 +292,12 @@ function validItemBody(b) {
   out.price = String(b.price || "").trim().slice(0, 20);
   out.location = String(b.location || "").trim().slice(0, 60);
   out.category = String(b.category || "").trim().slice(0, 60);
+  /* フォルダ: 数値のときだけ採用する。所有権の確認は呼び出し側（resolveFolderId）で行う */
+  out.folder_id = null;
+  if (b.folder_id !== null && b.folder_id !== undefined && b.folder_id !== "") {
+    const n = Number(b.folder_id);
+    if (Number.isInteger(n) && n > 0) out.folder_id = n;
+  }
   out.cover_url = String(b.cover_url || "").trim();
   out.image_key = String(b.image_key || "").trim();
   out.spine_key = String(b.spine_key || "").trim();
@@ -256,14 +308,22 @@ function validItemBody(b) {
   return out;
 }
 
+/* フォルダIDの所有権を確認する。自分のフォルダならIDを返し、他人のもの・存在しないものは null（未分類）にする */
+async function resolveFolderId(env, user, folderId) {
+  if (!folderId) return null;
+  const row = await env.DB.prepare("SELECT id FROM folders WHERE id = ? AND user_id = ?").bind(folderId, user.id).first();
+  return row ? row.id : null;
+}
+
 async function createItem(request, env, user, ctx) {
   const b = validItemBody(await request.json().catch(() => ({})));
   if (!b) return err("タイトルは必須です");
+  const folderId = await resolveFolderId(env, user, b.folder_id);
   const now = Math.floor(Date.now() / 1000);
   const res = await env.DB.prepare(
-    `INSERT INTO items (user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
-  ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
+    `INSERT INTO items (user_id, type, title, creator, publisher, isbn, catno, edition, price, location, category, folder_id, cover_url, image_key, spine_key, side_key, sort_order, status, prog_cur, prog_total, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE user_id = ?), ?, ?, ?, ?, ?)`
+  ).bind(user.id, b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, user.id, b.status, b.prog_cur, b.prog_total, now, now).run();
   const item = await env.DB.prepare(`SELECT ${ITEM_COLS}, 0 AS memo_count FROM items WHERE id = ?`).bind(res.meta.last_row_id).first();
   if (ctx) ctx.waitUntil(syncToNotion(env, user, item, "create", new URL(request.url).origin));
   return json(item, 201);
@@ -280,9 +340,10 @@ async function updateItem(request, env, user, id, ctx) {
   if (!existing) return err("見つかりません", 404);
   const b = validItemBody(await request.json().catch(() => ({})));
   if (!b) return err("タイトルは必須です");
+  const folderId = await resolveFolderId(env, user, b.folder_id);
   await env.DB.prepare(
-    `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
-  ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
+    `UPDATE items SET type=?, title=?, creator=?, publisher=?, isbn=?, catno=?, edition=?, price=?, location=?, category=?, folder_id=?, cover_url=?, image_key=?, spine_key=?, side_key=?, status=?, prog_cur=?, prog_total=?, updated_at=? WHERE id=? AND user_id=?`
+  ).bind(b.type, b.title, b.creator, b.publisher, b.isbn, b.catno, b.edition, b.price, b.location, b.category, folderId, b.cover_url, b.image_key, b.spine_key, b.side_key, b.status, b.prog_cur, b.prog_total, Math.floor(Date.now() / 1000), id, user.id).run();
   const updated = await getItem(env, user, id);
   if (ctx) ctx.waitUntil(syncToNotion(env, user, updated, "update", new URL(request.url).origin));
   return json(updated);
@@ -298,6 +359,96 @@ async function deleteItem(env, user, id, ctx) {
   }
   if (ctx) ctx.waitUntil(syncToNotion(env, user, existing, "delete"));
   return json({ ok: true });
+}
+
+/* ---------- folders ---------- */
+const FOLDER_COLS = "id, user_id, name, share_id, is_public, sort_order, created_at, updated_at";
+
+/* フォルダ一覧（自分のものだけ。件数付き・並び順） */
+async function listFolders(env, user) {
+  const rows = await env.DB.prepare(
+    `SELECT ${FOLDER_COLS}, (SELECT COUNT(*) FROM items i WHERE i.folder_id = folders.id AND i.user_id = ?) AS item_count
+     FROM folders WHERE user_id = ? ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC, id ASC`
+  ).bind(user.id, user.id).all();
+  return json({ folders: rows.results || [] });
+}
+
+async function getFolder(env, user, id) {
+  return env.DB.prepare(`SELECT ${FOLDER_COLS} FROM folders WHERE id = ? AND user_id = ?`).bind(id, user.id).first();
+}
+
+async function createFolder(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  const name = String(b.name || "").trim().slice(0, 60);
+  if (!name) return err("フォルダ名を入力してください");
+  const now = Math.floor(Date.now() / 1000);
+  /* share_id は一意になるまで再生成する（衝突はほぼ起きないが念のため3回まで） */
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const shareId = generateShareId();
+    try {
+      const res = await env.DB.prepare(
+        `INSERT INTO folders (user_id, name, share_id, is_public, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, 0, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM folders WHERE user_id = ?), ?, ?)`
+      ).bind(user.id, name, shareId, user.id, now, now).run();
+      const folder = await env.DB.prepare(`SELECT ${FOLDER_COLS}, 0 AS item_count FROM folders WHERE id = ?`).bind(res.meta.last_row_id).first();
+      return json(folder, 201);
+    } catch (e) {
+      if (!String((e && e.message) || "").includes("UNIQUE")) throw e;
+    }
+  }
+  return err("フォルダの作成に失敗しました", 500);
+}
+
+async function updateFolder(request, env, user, id) {
+  const folder = await getFolder(env, user, id);
+  if (!folder) return err("見つかりません", 404);
+  const b = await request.json().catch(() => ({}));
+  const sets = [];
+  const binds = [];
+  if (typeof b.name === "string") {
+    const name = b.name.trim().slice(0, 60);
+    if (!name) return err("フォルダ名を入力してください");
+    sets.push("name = ?");
+    binds.push(name);
+  }
+  if (typeof b.is_public === "boolean") {
+    sets.push("is_public = ?");
+    binds.push(b.is_public ? 1 : 0);
+  }
+  if (!sets.length) return json(folder);
+  sets.push("updated_at = ?");
+  binds.push(Math.floor(Date.now() / 1000));
+  await env.DB.prepare(`UPDATE folders SET ${sets.join(", ")} WHERE id = ? AND user_id = ?`).bind(...binds, id, user.id).run();
+  const updated = await getFolder(env, user, id);
+  return json(updated);
+}
+
+/* フォルダ削除：中のアイテムは未分類（folder_id=NULL）に戻し、アイテム自体は削除しない */
+async function deleteFolder(env, user, id) {
+  const folder = await getFolder(env, user, id);
+  if (!folder) return err("見つかりません", 404);
+  await env.DB.prepare("UPDATE items SET folder_id = NULL WHERE folder_id = ? AND user_id = ?").bind(id, user.id).run();
+  await env.DB.prepare("DELETE FROM folders WHERE id = ? AND user_id = ?").bind(id, user.id).run();
+  return json({ ok: true });
+}
+
+/* フォルダの並び順を保存する。自分のフォルダであることを確認（他人の id は無視） */
+async function reorderFolders(request, env, user) {
+  const { ids } = await request.json().catch(() => ({}));
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 1000) return err("並び順のリストが不正です");
+  const clean = [...new Set(ids.map((v) => parseInt(v)).filter((v) => Number.isInteger(v) && v > 0))];
+  if (!clean.length) return err("並び順のリストが不正です");
+  const placeholders = clean.map(() => "?").join(",");
+  const mine = await env.DB.prepare(`SELECT id FROM folders WHERE user_id = ? AND id IN (${placeholders})`).bind(user.id, ...clean).all();
+  const mineSet = new Set((mine.results || []).map((r) => r.id));
+  const stmts = [];
+  let n = 0;
+  for (const id of clean) {
+    if (!mineSet.has(id)) continue;
+    stmts.push(env.DB.prepare("UPDATE folders SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(n++, Math.floor(Date.now() / 1000), id, user.id));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return json({ ok: true, count: n });
 }
 
 /* ---------- memos ---------- */
@@ -1179,11 +1330,14 @@ function buildItemFilter(request) {
   const category = (u.searchParams.get("category") || "").trim();
   const unread = u.searchParams.get("unread") === "1";
   const withMemo = u.searchParams.get("withMemo") === "1";
+  const folder = (u.searchParams.get("folder") || "").trim();
   let where = "WHERE user_id = ?";
   const binds = [];
   if (q) { where += " AND (title LIKE ? OR creator LIKE ? OR catno LIKE ? OR category LIKE ? OR location LIKE ?)"; binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
   if (type && ["book", "cd", "dvd", "magazine", "other"].includes(type)) { where += " AND type = ?"; binds.push(type); }
   if (category) { where += " AND category = ?"; binds.push(category); }
+  if (folder === "none") { where += " AND folder_id IS NULL"; }
+  else if (/^\d+$/.test(folder)) { where += " AND folder_id = ?"; binds.push(parseInt(folder)); }
   if (unread) where += " AND status = 'unread'";
   if (withMemo) where += " AND EXISTS (SELECT 1 FROM memos m WHERE m.item_id = items.id)";
   return { where, binds };
@@ -1311,6 +1465,97 @@ async function exportToSheets(request, env, user) {
   }
 }
 
+/* ---------- 公開ページ（認証不要・読み取り専用） ----------
+   公開フォルダは /s/:shareId でログインなしに閲覧できる。
+   返す情報は表示に必要なものだけ（メールアドレス・ユーザーID・メモ等は含めない） */
+const PUBLIC_ITEM_COLS = "i.id, i.type, i.title, i.creator, i.publisher, i.isbn, i.catno, i.edition, i.price, i.cover_url, i.image_key";
+
+/* 公開フォルダの情報と中のアイテム一覧。非公開・存在しない shareId は404 */
+async function getPublicFolder(env, shareId) {
+  const folder = await env.DB.prepare(
+    "SELECT id, name, share_id FROM folders WHERE share_id = ? AND is_public = 1"
+  ).bind(shareId).first();
+  if (!folder) return err("見つかりません", 404);
+  const rows = await env.DB.prepare(
+    `SELECT ${PUBLIC_ITEM_COLS} FROM items i
+     WHERE i.folder_id = ? ORDER BY (i.sort_order IS NULL), i.sort_order ASC, i.created_at ASC, i.id ASC LIMIT 500`
+  ).bind(folder.id).all();
+  const items = rows.results || [];
+  return json({ folder: { name: folder.name, share_id: folder.share_id, item_count: items.length }, items });
+}
+
+/* 公開フォルダ内アイテムの画像（R2 本命 / KV は旧キーの読み取り互換）。
+   公開フォルダに属さない画像キーは404。認証なし・公開キャッシュ可 */
+async function servePublicImage(env, key) {
+  const row = await env.DB.prepare(
+    `SELECT 1 FROM items i JOIN folders f ON f.id = i.folder_id
+     WHERE f.is_public = 1 AND (i.image_key = ? OR i.spine_key = ? OR i.side_key = ?)`
+  ).bind(key, key, key).first();
+  if (!row) return err("見つかりません", 404);
+  if (env.IMAGES_R2) {
+    const obj = await env.IMAGES_R2.get(key).catch(() => null);
+    if (obj) {
+      const ct = (obj.httpMetadata && obj.httpMetadata.contentType) || "image/jpeg";
+      return new Response(obj.body, {
+        headers: { "Content-Type": ct, "Cache-Control": "public, max-age=86400", "ETag": obj.httpEtag || "" },
+      });
+    }
+  }
+  const obj = await env.IMAGES.getWithMetadata(key, { type: "stream" });
+  if (!obj || !obj.value) return err("見つかりません", 404);
+  return new Response(obj.value, {
+    headers: { "Content-Type": (obj.metadata && obj.metadata.contentType) || "image/jpeg", "Cache-Control": "public, max-age=86400" },
+  });
+}
+
+/* HTML属性値用のエスケープ（OGP差し込み用） */
+function escapeHtmlAttr(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/* /s/:shareId の公開ページ。index.html にフォルダに応じた OGP を差し込んで返す。
+   非公開・存在しないフォルダの場合は汎用のタイトル・説明にする（React 側で「見つかりません」を表示） */
+async function servePublicPage(request, env, shareId) {
+  const origin = new URL(request.url).origin;
+  const assetRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url).toString(), { method: "GET" }));
+  let html = await assetRes.text();
+  let title = "私の本棚 — Bookshelf";
+  let desc = "本棚を共有しています";
+  let image = "";
+  try {
+    const folder = await env.DB.prepare("SELECT id, name FROM folders WHERE share_id = ? AND is_public = 1").bind(shareId).first();
+    if (folder) {
+      const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM items WHERE folder_id = ?").bind(folder.id).first();
+      const count = countRow ? countRow.c : 0;
+      title = `${folder.name} — 私の本棚`;
+      desc = `「${folder.name}」 ${count}点の本棚を共有しています`;
+      const imgRow = await env.DB.prepare(
+        `SELECT image_key, cover_url FROM items
+         WHERE folder_id = ? AND (image_key != '' OR cover_url != '')
+         ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC, id ASC LIMIT 1`
+      ).bind(folder.id).first();
+      if (imgRow) {
+        if (imgRow.image_key) image = `${origin}/api/public/images/${encodeURIComponent(imgRow.image_key)}`;
+        else if (imgRow.cover_url) image = imgRow.cover_url;
+      }
+    }
+  } catch (_) { /* OGP の取得に失敗してもページ自体は返す */ }
+  const og = [
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:site_name" content="私の本棚">`,
+    `<meta property="og:title" content="${escapeHtmlAttr(title)}">`,
+    `<meta property="og:description" content="${escapeHtmlAttr(desc)}">`,
+    `<meta property="og:url" content="${escapeHtmlAttr(origin + "/s/" + shareId)}">`,
+    image ? `<meta property="og:image" content="${escapeHtmlAttr(image)}">` : "",
+    image ? `<meta name="twitter:card" content="summary_large_image">` : `<meta name="twitter:card" content="summary">`,
+  ].filter(Boolean).join("\n");
+  html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtmlAttr(title)}</title>`);
+  html = html.replace("</head>", og + "\n</head>");
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
 /* ---------- router ---------- */
 export default {
   async fetch(request, env, ctx) {
@@ -1325,7 +1570,24 @@ export default {
       /* Stripe Webhook は認証なし（署名検証で正当性を確認する） */
       if (path === "/api/billing/webhook" && request.method === "POST") return billingWebhook(request, env);
 
+      /* 公開ページ /s/:shareId は OGP を差し込んだ index.html を返す（認証不要） */
+      const sm = path.match(/^\/s\/([A-Za-z0-9]+)$/);
+      if (sm && request.method === "GET") {
+        await ensureSchema(env);
+        return servePublicPage(request, env, sm[1]);
+      }
+
+      /* 公開 API（認証不要）。非公開・存在しないものはハンドラ側で404 */
+      if (path.startsWith("/api/public/")) {
+        await ensureSchema(env);
+        let pm;
+        if ((pm = path.match(/^\/api\/public\/folders\/([A-Za-z0-9]+)$/)) && request.method === "GET") return getPublicFolder(env, pm[1]);
+        if ((pm = path.match(/^\/api\/public\/images\/(.+)$/)) && request.method === "GET") return servePublicImage(env, decodeURIComponent(pm[1]));
+        return err("Not Found", 404);
+      }
+
       if (path.startsWith("/api/")) {
+        await ensureSchema(env);
         const user = await currentUser(request, env);
         if (!user) return json({ error: "unauthorized" }, 401);
         if (user._emailNotVerified) return json({ error: "email_not_verified" }, 401);
@@ -1349,6 +1611,15 @@ export default {
           return syncAllToNotion(request, env, user);
         }
         if (path === "/api/items/reorder" && request.method === "PUT") return reorderItems(request, env, user);
+        if (path === "/api/folders" && request.method === "GET") return listFolders(env, user);
+        if (path === "/api/folders" && request.method === "POST") return createFolder(request, env, user);
+        if (path === "/api/folders/reorder" && request.method === "PUT") return reorderFolders(request, env, user);
+        let fm;
+        if ((fm = path.match(/^\/api\/folders\/(\d+)$/))) {
+          const folderId = parseInt(fm[1]);
+          if (request.method === "PATCH") return updateFolder(request, env, user, folderId);
+          if (request.method === "DELETE") return deleteFolder(env, user, folderId);
+        }
         if (path === "/api/labels" && request.method === "GET") return listLabels(env, user);
         if (path === "/api/items" && request.method === "GET") return listItems(request, env, user);
         if (path === "/api/export.csv" && request.method === "GET") {

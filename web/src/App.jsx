@@ -12,6 +12,7 @@ import MemosView from "./views/MemosView.jsx";
 import SettingsView from "./views/SettingsView.jsx";
 import AdminView from "./views/AdminView.jsx";
 import PromoView from "./views/PromoView.jsx";
+import PublicView from "./views/PublicView.jsx";
 import ItemDetailModal from "./components/ItemDetailModal.jsx";
 import ItemFormModal from "./components/ItemFormModal.jsx";
 import CoverEditorModal from "./components/CoverEditorModal.jsx";
@@ -50,6 +51,11 @@ export default function App() {
   /* /lp は公開プロモーションページ（ログイン不要） */
   if (window.location.pathname === "/lp") {
     return <PromoView />;
+  }
+
+  /* /s/:shareId は公開フォルダページ（ログイン不要・読み取り専用） */
+  if (window.location.pathname.startsWith("/s/")) {
+    return <PublicView />;
   }
 
   if (user === undefined) {

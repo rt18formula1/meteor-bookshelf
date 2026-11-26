@@ -14,6 +14,10 @@ export function AppProvider({ children }) {
   const [itemsVersion, setItemsVersion] = useState(0);
   const bumpItems = useCallback(() => setItemsVersion((v) => v + 1), []);
 
+  /* フォルダ変更の通知カウンタ（フォルダ一覧・件数の再取得用） */
+  const [foldersVersion, setFoldersVersion] = useState(0);
+  const bumpFolders = useCallback(() => setFoldersVersion((v) => v + 1), []);
+
   /* モーダル類の状態（App レベルで一元管理し、どのビューからでも開けるようにする） */
   const [detail, setDetail] = useState(null); // { id, focusMemo }
   const [formPrefill, setFormPrefill] = useState(null); // null=閉, {}=開
@@ -38,6 +42,7 @@ export function AppProvider({ children }) {
     totalCount, setTotalCount,
     toast,
     itemsVersion, bumpItems,
+    foldersVersion, bumpFolders,
     detail, openDetail, closeDetail,
     formPrefill, openForm, closeForm,
     coverEditor, openCoverEditor, closeCoverEditor,

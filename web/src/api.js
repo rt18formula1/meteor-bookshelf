@@ -73,6 +73,28 @@ export function apiImageObjectUrl(key) {
   return imageUrlCache.get(key);
 }
 
+/* ---------- フォルダ ---------- */
+export const listFolders = () => api("/api/folders");
+export const createFolder = (name) => apiJson("/api/folders", "POST", { name });
+export const updateFolder = (id, patch) => apiJson(`/api/folders/${id}`, "PATCH", patch);
+export const deleteFolder = (id) => api(`/api/folders/${id}`, { method: "DELETE" });
+export const reorderFolders = (ids) => apiJson("/api/folders/reorder", "PUT", { ids });
+
+/* 公開フォルダの取得（認証不要。api() は未ログイン時もそのまま送れる） */
+export const getPublicFolder = (shareId) => api(`/api/public/folders/${encodeURIComponent(shareId)}`);
+
+/* 公開画像URL（認証不要）。item.image_key がある場合に使う */
+export function publicImageUrl(key) {
+  return key ? `/api/public/images/${encodeURIComponent(key)}` : "";
+}
+/* 公開ページでの表紙画像URL。ユーザー写真があれば公開画像URL、なければ外部表紙URL */
+export function publicCoverSrc(item) {
+  if (!item) return "";
+  if (item.image_key) return publicImageUrl(item.image_key);
+  if (item.cover_url) return item.cover_url;
+  return "";
+}
+
 /* CSV をダウンロードする（絞り込みパラメータ対応: type, q, unread, withMemo） */
 export async function downloadCsv(params = {}) {
   const clean = {};

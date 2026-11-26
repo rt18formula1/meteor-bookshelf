@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, apiJson } from "../api.js";
+import { api, apiJson, listFolders } from "../api.js";
 import { useApp } from "../store.jsx";
 import { TYPE_FILTERS, coverSrc, spineColor } from "../utils.js";
 import Shelf, { EmptyShelf } from "../components/Shelf.jsx";
 import PulloutPanel from "../components/PulloutPanel.jsx";
 import ListRow from "../components/ListRow.jsx";
 import AuthedImage from "../components/AuthedImage.jsx";
-import { IconMemo, IconScan } from "../components/Icons.jsx";
+import FolderManagerModal from "../components/FolderManagerModal.jsx";
+import ShareModal from "../components/ShareModal.jsx";
+import { IconFolder, IconMemo, IconScan, IconShare } from "../components/Icons.jsx";
 
 const PAGE = 28;
 
@@ -21,8 +23,12 @@ const SORT_OPTIONS = [
 ];
 
 export default function HomeView({ viewMode, setViewMode }) {
-  const { toast, itemsVersion, setView, setTotalCount, bumpItems } = useApp();
+  const { toast, itemsVersion, foldersVersion, setView, setTotalCount, bumpItems } = useApp();
   const [homeType, setHomeType] = useState("");
+  const [folder, setFolder] = useState(""); // ""=すべて, "none"=未分類, フォルダID（文字列）=そのフォルダ
+  const [folders, setFolders] = useState([]);
+  const [showFolderManager, setShowFolderManager] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [counts, setCounts] = useState({});
@@ -48,25 +54,39 @@ export default function HomeView({ viewMode, setViewMode }) {
       const offset = reset ? 0 : itemsRef.current.length;
       const qs = new URLSearchParams({ type: homeType, limit: PAGE, offset, sort });
       if (category) qs.set("category", category);
+      if (folder === "none") qs.set("folder", "none");
+      else if (folder) qs.set("folder", folder);
       const data = await api(`/api/items?${qs}`);
       const next = reset ? data.items : itemsRef.current.concat(data.items);
       setItems(next);
       setTotal(data.total);
-      if (homeType === "") setTotalCount(data.total);
+      if (homeType === "" && folder === "") setTotalCount(data.total);
       setHasMore(next.length < data.total);
     } catch (e) {
       toast(e.message);
     } finally {
       loadingRef.current = false;
     }
-  }, [homeType, sort, category, toast, setTotalCount]);
+  }, [homeType, sort, category, folder, toast, setTotalCount]);
 
   /* 初回・フィルター/並び順変更・アイテム変更時はリセット読み込み */
   useEffect(() => {
     setSelectedId(null);
     load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [homeType, sort, category, itemsVersion]);
+  }, [homeType, sort, category, folder, itemsVersion]);
+
+  /* フォルダ一覧（件数付き）。アイテム変更でも件数が変わるため itemsVersion も見る */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await listFolders();
+        if (!cancelled) setFolders(data.folders || []);
+      } catch { /* フォルダが取れない場合はチップを出さない */ }
+    })();
+    return () => { cancelled = true; };
+  }, [foldersVersion, itemsVersion]);
 
   /* 種別ごとの件数（ピル表示用）＋カテゴリー候補 */
   useEffect(() => {
@@ -138,8 +158,12 @@ export default function HomeView({ viewMode, setViewMode }) {
   };
 
   const selectedItem = items.find((x) => x.id === selectedId) || null;
-  const isEmpty = total === 0 && homeType === "" && category === "";
+  const isEmpty = total === 0 && homeType === "" && category === "" && folder === "";
   const grandTotal = counts[""] != null ? counts[""] : total;
+  /* 未分類の件数 = 全体 - 各フォルダの件数の合計 */
+  const folderCountSum = folders.reduce((s, f) => s + (f.item_count || 0), 0);
+  const uncategorizedCount = Math.max(0, grandTotal - folderCountSum);
+  const selectedFolder = folder && folder !== "none" ? folders.find((f) => String(f.id) === folder) || null : null;
 
   if (editing) {
     return (
@@ -222,6 +246,43 @@ export default function HomeView({ viewMode, setViewMode }) {
         )}
       </div>
 
+      {/* フォルダチップ（すべて／未分類／各フォルダ）＋フォルダ管理・共有 */}
+      <div className="folder-bar">
+        <div className="chips">
+          <button
+            className={`chip${folder === "" ? " active" : ""}`}
+            onClick={() => setFolder("")}
+          >
+            すべて<span className="chip-count">{grandTotal}</span>
+          </button>
+          <button
+            className={`chip${folder === "none" ? " active" : ""}`}
+            onClick={() => setFolder("none")}
+          >
+            未分類<span className="chip-count">{uncategorizedCount}</span>
+          </button>
+          {folders.map((f) => (
+            <button
+              key={f.id}
+              className={`chip${folder === String(f.id) ? " active" : ""}`}
+              onClick={() => setFolder(String(f.id))}
+            >
+              <IconFolder size={15} /> {f.name}
+              <span className="chip-count">{f.item_count}</span>
+              {f.is_public ? <span className="chip-public">公開</span> : null}
+            </button>
+          ))}
+        </div>
+        <div className="folder-bar-actions">
+          <button className="btn-secondary btn-small" onClick={() => setShowFolderManager(true)}>
+            <IconFolder size={15} /> フォルダ管理
+          </button>
+          <button className="btn-secondary btn-small" onClick={() => setShowShare(true)}>
+            <IconShare size={15} /> 共有
+          </button>
+        </div>
+      </div>
+
       {/* 種別ピル（件数つき・ダーク）＋表示切替 */}
       <div className="pills-row">
         <div className="chips chips-dark">
@@ -288,6 +349,9 @@ export default function HomeView({ viewMode, setViewMode }) {
           )}
         </div>
       )}
+
+      {showFolderManager && <FolderManagerModal onClose={() => setShowFolderManager(false)} />}
+      {showShare && <ShareModal folder={selectedFolder} onClose={() => setShowShare(false)} />}
     </section>
   );
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Modal from "./Modal.jsx";
 import Cover from "./Cover.jsx";
-import { api, apiJson, apiImageObjectUrl } from "../api.js";
+import { api, apiJson, apiImageObjectUrl, listFolders } from "../api.js";
 import { useApp } from "../store.jsx";
 import { TYPE_BADGE, externalLinks, fmtDate, fmtPrice } from "../utils.js";
 import { IconCamera } from "./Icons.jsx";
@@ -15,6 +15,7 @@ export default function ItemDetailModal() {
   const [fields, setFields] = useState(null);
   const [busy, setBusy] = useState(false);
   const [labels, setLabels] = useState({ locations: [], categories: [] });
+  const [folders, setFolders] = useState([]);
   const [slotBusy, setSlotBusy] = useState(false);
   const memoRef = useRef(null);
   const coverFileRef = useRef(null);
@@ -40,9 +41,11 @@ export default function ItemDetailModal() {
           type: it.type, status: it.status, title: it.title,
           creator: it.creator || "", publisher: it.publisher || "", isbn: it.isbn || "", catno: it.catno || "",
           edition: it.edition || "", price: it.price || "", location: it.location || "", category: it.category || "",
+          folder_id: it.folder_id != null && it.folder_id !== "" ? String(it.folder_id) : "",
           prog_cur: it.prog_cur || "", prog_total: it.prog_total || "",
         });
         api("/api/labels").then((d) => { if (!cancelled) setLabels(d); }).catch(() => {});
+        listFolders().then((d) => { if (!cancelled) setFolders(d.folders || []); }).catch(() => {});
         await loadMemos(id);
         if (detail.focusMemo && memoRef.current) {
           setTimeout(() => memoRef.current && memoRef.current.focus(), 120);
@@ -240,6 +243,14 @@ export default function ItemDetailModal() {
               <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
               <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="detail-locations" /></label>
               <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="detail-categories" /></label>
+              <label>フォルダ
+                <select value={fields.folder_id} onChange={set("folder_id")}>
+                  <option value="">未分類</option>
+                  {folders.map((f) => (
+                    <option key={f.id} value={String(f.id)}>{f.name}</option>
+                  ))}
+                </select>
+              </label>
               <datalist id="detail-locations">
                 {labels.locations.map((v) => <option key={v} value={v} />)}
               </datalist>

@@ -86,6 +86,20 @@ export const IconDownload = base(
     <P d="M12 15V3" />
   </>
 );
+export const IconFolder = base(
+  <>
+    <P d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+  </>
+);
+export const IconShare = base(
+  <>
+    <circle cx="18" cy="5" r="3" />
+    <circle cx="6" cy="12" r="3" />
+    <circle cx="18" cy="19" r="3" />
+    <P d="m8.59 13.51 6.83 3.98" />
+    <P d="m15.41 6.51-6.82 3.98" />
+  </>
+);
 export const IconBookLogo = base(
   <>
     <P d="M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2z" />

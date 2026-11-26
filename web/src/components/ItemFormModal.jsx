@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import Modal from "./Modal.jsx";
-import { api, apiJson } from "../api.js";
+import { api, apiJson, listFolders } from "../api.js";
 import { useApp } from "../store.jsx";
 import { IconCamera } from "./Icons.jsx";
 import AuthedImage from "./AuthedImage.jsx";
@@ -8,7 +8,7 @@ import AuthedImage from "./AuthedImage.jsx";
 const EMPTY = {
   type: "book", status: "unread", title: "", creator: "", publisher: "",
   isbn: "", catno: "", edition: "", price: "", location: "", category: "",
-  cover_url: "", prog_cur: "", prog_total: "",
+  folder_id: "", cover_url: "", prog_cur: "", prog_total: "",
 };
 
 export default function ItemFormModal() {
@@ -17,6 +17,7 @@ export default function ItemFormModal() {
   const [imageKey, setImageKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [labels, setLabels] = useState({ locations: [], categories: [] });
+  const [folders, setFolders] = useState([]);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -33,6 +34,7 @@ export default function ItemFormModal() {
         price: formPrefill.price != null ? String(formPrefill.price) : "",
         location: formPrefill.location || "",
         category: formPrefill.category || "",
+        folder_id: formPrefill.folder_id != null && formPrefill.folder_id !== "" ? String(formPrefill.folder_id) : "",
         cover_url: formPrefill.cover_url || "",
         prog_cur: formPrefill.prog_cur ?? "",
         prog_total: formPrefill.prog_total ?? "",
@@ -40,6 +42,7 @@ export default function ItemFormModal() {
       setImageKey(formPrefill.image_key || "");
       /* 保有場所・カテゴリーの候補（取得できなければ通常のテキスト入力のまま） */
       api("/api/labels").then(setLabels).catch(() => {});
+      listFolders().then((d) => setFolders(d.folders || [])).catch(() => {});
     }
   }, [formPrefill]);
 
@@ -55,6 +58,7 @@ export default function ItemFormModal() {
     try {
       await apiJson("/api/items", "POST", {
         ...fields,
+        folder_id: fields.folder_id === "" ? null : parseInt(fields.folder_id, 10),
         image_key: imageKey,
         prog_cur: fields.prog_cur === "" ? 0 : parseInt(fields.prog_cur, 10) || 0,
         prog_total: fields.prog_total === "" ? 0 : parseInt(fields.prog_total, 10) || 0,
@@ -111,6 +115,14 @@ export default function ItemFormModal() {
           <label>価格（円）<input type="text" inputMode="numeric" value={fields.price} onChange={set("price")} placeholder="例: 1650" /></label>
           <label>保有場所<input type="text" value={fields.location} onChange={set("location")} placeholder="例: 本棚 / Kindle" list="form-locations" /></label>
           <label>カテゴリー<input type="text" value={fields.category} onChange={set("category")} placeholder="例: 小説 / ジャズ" list="form-categories" /></label>
+          <label>フォルダ
+            <select value={fields.folder_id} onChange={set("folder_id")}>
+              <option value="">未分類</option>
+              {folders.map((f) => (
+                <option key={f.id} value={String(f.id)}>{f.name}</option>
+              ))}
+            </select>
+          </label>
           <label>表紙画像URL<input type="text" value={fields.cover_url} onChange={set("cover_url")} placeholder="https://..." /></label>
           <datalist id="form-locations">
             {labels.locations.map((v) => <option key={v} value={v} />)}

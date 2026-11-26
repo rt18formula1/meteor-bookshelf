@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id),
-  type TEXT NOT NULL DEFAULT 'book',        -- book | cd | dvd | other
+  type TEXT NOT NULL DEFAULT 'book',        -- book | cd | dvd | magazine | other
   title TEXT NOT NULL,
   creator TEXT DEFAULT '',
   publisher TEXT DEFAULT '',
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS items (
   price TEXT DEFAULT '',              -- 価格（数字文字列、円）
   location TEXT DEFAULT '',           -- 保有場所（本棚 / Kindle 等、自由ラベル）
   category TEXT DEFAULT '',           -- オリジナルカテゴリー（自由ラベル）
+  folder_id INTEGER,                  -- 所属フォルダ（NULL は未分類。論理参照。既存DBには Worker の ensureSchema が ALTER TABLE で追加する）
   cover_url TEXT DEFAULT '',
   image_key TEXT DEFAULT '',           -- 表表紙の画像キー（KV）
   spine_key TEXT DEFAULT '',           -- 背表紙の画像キー（KV）
@@ -49,6 +50,22 @@ CREATE TABLE IF NOT EXISTS items (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_items_folder ON items(user_id, folder_id);
+
+-- フォルダ（本棚の中の「入れ物」）。カテゴリーとは別概念。
+-- share_id は公開URL /s/:shareId 用の推測困難なランダム文字列。is_public=1 のフォルダだけ公開される。
+CREATE TABLE IF NOT EXISTS folders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  share_id TEXT NOT NULL UNIQUE,
+  is_public INTEGER NOT NULL DEFAULT 0,
+  sort_order INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_folders_share ON folders(share_id);
 
 CREATE TABLE IF NOT EXISTS memos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,3 +92,4 @@ CREATE TABLE IF NOT EXISTS license_codes (
   revoked INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_license_codes_redeemed_by ON license_codes(redeemed_by);
+
