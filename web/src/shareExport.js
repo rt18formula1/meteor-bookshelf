@@ -3,10 +3,10 @@
    表紙画像は取得できない場合があるため、取得失敗時は色タイル＋頭文字で代替表示する
    （Canvas が汚染されると toBlob が使えなくなるため、取得失敗した画像は描画しない）。
    PDF の文字はすべて Canvas 内に描く。jsPDF の doc.text は日本語を扱えず文字化けするため使わない。
-   表紙は自然な縦横比で描く（棚の行レイアウト）。画像の選択は棚と同じ優先順位
-   （背表紙 → 表表紙 → 裏表紙 → 外部表紙）で、背表紙・裏表紙だけの本も共有に画像が出る。 */
+   表紙は自然な縦横比で描く（棚の行レイアウト）。画像は表表紙（coverSrc：表表紙 → 外部表紙）
+   を使う。背表紙・裏表紙は使わない。表表紙も外部表紙もない本は色タイル＋頭文字で代替表示する。 */
 import { apiImageObjectUrl } from "./api.js";
-import { spineColor, spineSrc, spineTextColor } from "./utils.js";
+import { coverSrc, spineColor, spineTextColor } from "./utils.js";
 
 /* JST の日時スタンプ（ファイル名用） */
 function jstStamp() {
@@ -36,11 +36,11 @@ async function loadImageBlobUrl(url, timeoutMs = 6000) {
 }
 
 /* アイテムの表紙画像を HTMLImageElement として読み込む。失敗時は null。
-   画像の選択は棚と同じ優先順位（spineSrc：背表紙 → 表表紙 → 裏表紙 → 外部表紙）。
+   画像は表表紙（coverSrc：表表紙 → 外部表紙）を使う。背表紙・裏表紙は使わない。
    返すのは { img, objectUrl, owned, ratio }。owned は自分で作った blob URL かどうか
    （apiImageObjectUrl の URL はアプリ全体でキャッシュ共有しているため revoke しない） */
 async function loadCoverImage(item) {
-  const src = spineSrc(item);
+  const src = coverSrc(item);
   if (!src) return null;
   let objectUrl = null;
   let owned = false;
