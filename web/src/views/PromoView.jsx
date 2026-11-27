@@ -112,6 +112,10 @@ export default function PromoView() {
       </main>
 
       <footer style={{ borderTop: "1px solid #eee0cb", padding: "18px 0 26px", textAlign: "center", color: "#8a715a", fontSize: 13 }}>
+        <p style={{ margin: "0 0 10px", display: "flex", justifyContent: "center", gap: 22 }}>
+          <a href="https://www.instagram.com/bookshelf_meteor/" target="_blank" rel="noopener noreferrer" style={{ color: "#b8620a", fontWeight: 700, textDecoration: "none" }}>Instagram</a>
+          <a href="https://www.threads.com/@bookshelf_meteor" target="_blank" rel="noopener noreferrer" style={{ color: "#b8620a", fontWeight: 700, textDecoration: "none" }}>Threads</a>
+        </p>
         <p style={{ margin: 0 }}>© Meteor Creator Studio</p>
       </footer>
     </div>
