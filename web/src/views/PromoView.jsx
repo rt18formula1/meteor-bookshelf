@@ -42,7 +42,7 @@ export default function PromoView() {
             わたしの本棚の手帖
           </h1>
           <p style={{ fontFamily: "'Noto Serif JP', serif", fontSize: "clamp(18px, 3.4vw, 24px)", color: "#6b543f", lineHeight: 1.6, margin: "0 0 14px" }}>
-            本も、CDも、DVDも。<br />木の本棚に並べるように。
+            本も、CDも、DVDも。<br />自分だけのコレクションを、ひとつの場所に。
           </p>
           <p style={{ color: "#6b543f", fontSize: 16, lineHeight: 1.8, margin: "0 auto 22px", maxWidth: 620 }}>
             「わたしの本棚の手帖」は、書籍・CD・DVDなどを木の本棚のメタファーで管理するWebアプリです。
